@@ -7,9 +7,9 @@
 
 所有資料皆以 CSV 格式儲存，並以時間序列為核心維度。
 
-### 1. `global_prices.csv` & `global_volumes.csv`
+### 1. `global_prices.csv` & `global_opens.csv` & `global_volumes.csv`
 
-這兩個檔案分別紀錄了全球股票、指數與匯率的**每日收盤價 (Close)** 與 **成交量 (Volume)**。
+這兩個檔案分別紀錄了全球股票、指數與匯率的**每日收盤價 (Close)** 、**每日開盤價 (Open)** 與 **成交量 (Volume)**。
 資料主鍵為 `Date`（交易日期）。欄位名稱即為股票代號（Ticker）：
 
 * **台股預測標的**
@@ -69,72 +69,24 @@
 
 ### 4. `tx_futures_night.csv`
 
-過濾出「台指期貨（TX）」的盤後交易（夜盤）數據，這是捕捉美國白晝時間發生重大政治言論時，台股市場最即時的避險反應。
+本資料表紀錄了「台指期貨（TX）」的盤後交易（夜盤）數據。由於夜盤的交易時間與美股開盤時間重疊，這是捕捉美國白晝時間發生重大政治/貿易言論時，台灣市場最即時的避險反應與情緒定價。
+**(註：本資料已篩選每日僅保留成交量最大之「近月合約」，以排除遠月合約流動性不足所造成的價格雜訊。)**
 
-* `date`：夜盤開盤所屬之交易日期（注意：夜盤的結算日歸屬通常為次一交易日）
-* `futures_id`：期貨代號（固定為 TX）
-* `trade_session`：交易時段（固定為 `after_market`）
-* `open` / `high` / `low` / `close`：夜盤的開高低收點數
-* `volume`：夜盤總成交口數
+* **基礎屬性與時段欄位**
+* `date`：夜盤開盤所屬之實際日曆日期。（注意：期貨市場的嚴格定義中，夜盤算在次一交易日的帳上，但此處紀錄為實際發生的日曆天，方便與同日的美國重大事件對齊）。
+* `futures_id`：期貨代號（固定為 `TX`，即大台指）。
+* `contract_date`：期貨合約到期月份（例如 `201705` 代表 5 月合約）。當您觀察到月份跳動時（如 5/17 為 201705，5/18 變為 201706），代表當月合約已結算，主力資金已「換倉」至次月合約。
+* `trading_session`：交易時段（本表固定為 `after_market`，即夜盤）。
 
+
+* **價量特徵欄位 (Model Features)**
+* `open` / `max` / `min` / `close`：分別代表夜盤的開盤、最高、最低與收盤點數。
+* `volume`：夜盤總成交口數。爆出大成交量通常代表市場對當晚的美國總經數據或突發言論產生劇烈反應。
+* **`spread`**：夜盤漲跌點數（相較於當日下午日盤收盤價的變化）。
+* **`spread_per`**：夜盤漲跌幅百分比（例如 `-0.84` 代表跌 0.84%）。**💡 建模建議：** 這個欄位是極佳的「情緒特徵（Sentiment Feature）」，可以直接作為預測隔日台積電/大盤開盤跳空幅度的領先指標。
+
+
+* **期貨結算欄位 (通常不適用於夜盤)**
+* `settlement_price`：每日結算價（夜盤期間通常無結算價，故顯示為 `0`）。
+* `open_interest`：未平倉口數（部分 API 在夜盤資料中不即時更新此欄位，常顯示為 `0`，建議建模時忽略此欄位）。
 ---
-
-## 🛠️ 如何使用這項數據進行預測建模 (Usage Guide)
-
-在將此數據集與「川普社群文本情緒分數」合併進行機器學習（如 XGBoost, LSTM）或時間序列迴歸時，請務必遵循以下處理步驟，以避免「前視偏誤」（Data Leakage / Look-ahead Bias）：
-
-### 步驟一：處理跨時區的時間平移 (Time Shifting)
-
-台股的交易時間為 T 日 09:00 - 13:30，而美股交易時間對應台灣為 T-1 日的晚上至 T 日凌晨。
-如果您要預測 **T 日** 的台股報酬，您只能看見 **T-1 日** 的美股收盤價。因此，在合併資料前，必須將美股特徵往下平移一天：
-
-```python
-import pandas as pd
-
-# 讀取價格資料
-prices = pd.read_csv('taiwan_market_data/global_prices.csv', index_col='Date', parse_dates=True)
-
-# 分離台股與美股
-taiwan_stocks = ['2330.TW', '2454.TW', '0050.TW']
-us_features = ['TSM', '^SOX', '^NDX', '^GSPC', '^VIX', 'TWD=X', '^TNX']
-
-# 美股與總經指標必須 shift(1)，確保模型預測 T 日台股時，使用的是 T-1 日的美股收盤狀態
-df_us_shifted = prices[us_features].shift(1)
-
-```
-
-### 步驟二：建構預測目標 (Target Variable $Y$)
-
-依據您的研究設計，計算台積電等標的的隔日報酬率。建議將報酬率平穩化：
-
-```python
-# 目標 Y：計算 2330.TW 今日收盤相較於昨日收盤的報酬率
-df_target = prices[taiwan_stocks].pct_change()
-df_target = df_target.rename(columns={col: f"{col}_Return" for col in taiwan_stocks})
-
-```
-
-### 步驟三：資料表關聯與合併 (Merging)
-
-籌碼資料（三大法人與融資券）是長表格（Long Format），需要先篩選出特定個股，再與價格時間序列合併。
-
-```python
-# 讀取籌碼資料
-inst_df = pd.read_csv('taiwan_market_data/institutional_investors.csv', parse_dates=['date'])
-
-# 篩選 2330 的外資買賣超
-fii_2330 = inst_df[(inst_df['stock_id'] == 2330) & (inst_df['name'] == 'Foreign_Investor')]
-fii_2330['net_buy'] = fii_2330['buy'] - fii_2330['sell']
-fii_2330 = fii_2330.set_index('date')[['net_buy']].rename(columns={'net_buy': 'FII_Net_Buy_2330'})
-
-# 前一天的法人買賣超也是解釋 T 日報酬的特徵，因此也要 shift(1)
-fii_2330_shifted = fii_2330.shift(1)
-
-```
-
-### 步驟四：整合社群文本資料 (最終模型矩陣)
-
-將處理好的美股平移資料、法人平移資料、台指期夜盤資料，與您爬蟲獲得並量化後的「川普社群發文情緒分數（Sentiment Score）」透過日期（Date）進行 `pd.concat()` 或 `.join()`。
-
-**模型解釋性重點**：
-在回歸模型中，如果 `川普情緒分數` 的係數在加入了 `TSM (ADR)` 與 `tx_futures_night (台指夜盤)` 的控制後**依然達到統計顯著（p-value < 0.05）**，這就是您的研究最具價值的結論——證明了政治人物的社交媒體言論具備超越傳統金融市場指標的**額外預測能力 (Incremental Predictive Power)**。
