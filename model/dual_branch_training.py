@@ -679,8 +679,21 @@ if __name__ == "__main__":
     # 使用貼文資料集中所有數值型特徵（包含 kw_ 關鍵字與情緒 one-hot）
     text_feature_cols = None
 
-    # 目標清單：台股預測標的
-    target_list = ["2330.TW", "2454.TW", "0050.TW"]
+    # 目標清單：台股預測標的（已擴充）
+    target_list = [
+        "0050.TW",
+        "00632R.TW",
+        "00679B.TW",
+        "2303.TW",
+        "2308.TW",
+        "2317.TW",
+        "2330.TW",
+        "2376.TW",
+        "2377.TW",
+        "2382.TW",
+        "2454.TW",
+        "3711.TW",
+    ]
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     results_rows = []
