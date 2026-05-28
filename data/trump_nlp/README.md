@@ -1,110 +1,91 @@
-# Step 2：川普貼文 NLP 情感特徵萃取 (2017–2026)
+# 川普貼文 NLP 特徵分析資料集 (2017-2026) — README
 
-本資料夾為本專案的**第二步驟**，負責處理 2017–2026 年間川普於各社群媒體平台的原始發文資料，透過自然語言處理 (NLP) 技術將每篇貼文轉換為可供機器學習模型訓練的量化情緒特徵向量。
+本資料集收錄了唐納·川普 (Donald Trump) 自 **2017 年 1 月 1 日至 2026 年 4 月 30 日** 期間在 **Twitter/X** 及 **Truth Social** 上發表的所有貼文（共 **70,730 筆**），並整合了高精度的自然語言處理 (NLP)、情感分析、與特定經濟/科技主題的關鍵字標記。
 
-**上游輸入**：Step 1 產生的台股量化數據（`data/taiwan_market_data/`）  
-**本步驟輸出**：`trump_posts_features_2017_2026.csv`（70,730 筆帶有 NLP 特徵的發文資料）
-
----
-
-## 📁 腳本說明
-
-| 腳本名稱 | 說明 |
-| :--- | :--- |
-| `scrape_truth_social.py` | 爬取 Truth Social 平台上的川普發文（2021 年後），輸出 `trump_truth_social_posts.csv` |
-| `merge_datasets.py` | 將 Twitter 歷史資料（`tweets.csv`）與 Truth Social 爬蟲結果合併，統一格式，輸出 `merged_trump_posts.csv` |
-| `extract_nlp_features.py` | 對合併後的發文資料逐筆進行 NLP 特徵萃取，輸出最終的 `trump_posts_features_2017_2026.csv` |
+本資料集特別適合用於量化交易、金融市場時間序列預測（如預測台股、美股波動）以及政治輿情分析。
 
 ---
 
-## 🚀 如何執行
-
-### 環境需求
-```bash
-pip install transformers torch pandas vaderSentiment nltk tqdm
-```
-> 執行前請先完成 NLTK VADER 字典的初次下載：
-> ```python
-> import nltk; nltk.download('vader_lexicon')
-> ```
-
-### 執行順序
-
-**Step 2-1：爬取 Truth Social 資料**
-```bash
-python scrape_truth_social.py
-```
-- 輸出：`trump_truth_social_posts.csv`
-
-**Step 2-2：合併資料集**
-```bash
-python merge_datasets.py
-```
-- 輸入：`tweets.csv`（Twitter 歷史，請自行取得）、`trump_truth_social_posts.csv`
-- 輸出：`merged_trump_posts.csv`（共 70,730 筆）
-
-**Step 2-3：執行 NLP 特徵萃取**
-```bash
-python extract_nlp_features.py
-```
-- 輸入：`merged_trump_posts.csv`
-- 輸出：`trump_posts_features_2017_2026.csv`
-- ⏱️ 預計執行時間：約 25–30 分鐘（使用 Apple Silicon MPS GPU 加速）或 40–60 分鐘（CPU）
-- 🔁 支援**斷點續傳**：若中途中斷，重新執行會從上次存檔位置繼續
+## 📂 檔案基本資訊
+- **檔名**：`trump_posts_features_2017_2026.csv`
+- **資料期間**：2017-01-01 00:00:00 UTC ~ 2026-04-30 23:59:59 UTC
+- **總筆數**：70,730 筆
+- **編碼格式**：UTF-8 (以雙引號 `"` 包含包含換行符號的文字)
 
 ---
 
-## 📊 輸出欄位說明（trump_posts_features_2017_2026.csv）
+## 📊 欄位詳細說明 (Schema)
 
-> ⚠️ 注意：此 CSV 因體積較大已加入 `.gitignore`，請向本步驟負責人取得，或自行重新執行腳本產生。
+本 CSV 檔案包含 **16 個欄位**，具體欄位定義如下：
 
-| 欄位 | 型態 | 說明 |
-| :--- | :--- | :--- |
-| `Timestamp` | DateTime (UTC) | 發文時間（UTC 時區，含時區資訊） |
-| `Content` | String | 貼文原始文字 |
-| `Likes` | Integer | 按讚數 |
-| `Retweets` | Integer | 轉發數 |
-| `Platform` | String | `Twitter_Legacy` 或 `Truth_Social` |
-| `kw_china` | 0/1 | 是否提及 China / Chinese |
-| `kw_taiwan` | 0/1 | 是否提及 Taiwan / Taiwanese |
-| `kw_tariffs` | 0/1 | 是否提及 Tariff / Tax |
-| `kw_sanctions` | 0/1 | 是否提及 Sanction |
-| `kw_chips` | 0/1 | 是否提及 Chips / Semiconductor |
-| `kw_tech` | 0/1 | 是否提及 Tech / Technology |
-| `kw_ai` | 0/1 | 是否提及 AI / Artificial Intelligence |
-| `vader_compound` | Float [-1, 1] | VADER 情感綜合分數 |
-| `emotion_label` | String | RoBERTa 模型情緒分類（7 類） |
-| `emotion_score` | Float [0, 1] | 情緒分類的置信度機率 |
-| `weighted_vader` | Float | 按讚數加權後的 VADER 分數：`vader_compound × ln(1 + Likes)` |
-
-**7 種情緒標籤 (emotion_label)**：`joy`, `anger`, `sadness`, `fear`, `surprise`, `disgust`, `neutral`
+| 欄位名稱 | 資料類型 | 說明 | 範例與數值範圍 |
+| :--- | :--- | :--- | :--- |
+| **`Timestamp`** | DateTime | 貼文發佈時間 (預設為 **UTC** 時區) | `2017-02-04 03:07:47+00:00` |
+| **`Content`** | String | 貼文的原始文字內容 | `"MAKE AMERICA GREAT AGAIN!"` |
+| **`Likes`** | Integer | 該篇貼文獲得的按讚數 (Like / Heart) | `132817` |
+| **`Retweets`** | Integer | 該篇貼文獲得的轉發/轉貼數 (Retweet / Re-truth) | `21891` |
+| **`Platform`** | String | 貼文發布平台來源 | `Twitter_Legacy` (推特歷史資料)<br>`Truth_Social` (Truth Social 貼文) |
+| **`kw_china`** | Binary (0/1) | 貼文是否提及「中國」關鍵字 (China, Chinese) | `1` 或 `0` |
+| **`kw_taiwan`** | Binary (0/1) | 貼文是否提及「台灣」關鍵字 (Taiwan, Taiwanese) | `1` 或 `0` |
+| **`kw_tariffs`** | Binary (0/1) | 貼文是否提及「關稅」關鍵字 (Tariff, Tariffs, Tax) | `1` 或 `0` |
+| **`kw_sanctions`** | Binary (0/1) | 貼文是否提及「制裁」關鍵字 (Sanction, Sanctions) | `1` 或 `0` |
+| **`kw_chips`** | Binary (0/1) | 貼文是否提及「晶片」關鍵字 (Chips, Semiconductor, Semiconductors) | `1` 或 `0` |
+| **`kw_tech`** | Binary (0/1) | 貼文是否提及「科技」關鍵字 (Tech, Technology) | `1` 或 `0` |
+| **`kw_ai`** | Binary (0/1) | 貼文是否提及「人工智慧」關鍵字 (AI, Artificial Intelligence) | `1` 或 `0` |
+| **`vader_compound`** | Float | 採用 VADER 情感分析器計算出的**綜合情緒分數** | `-1.0` (極度悲觀) 至 `1.0` (極度樂觀)<br>`0.0` 表示中立 |
+| **`emotion_label`** | String | 基於 RoBERTa 深度學習模型預測的 **7 大核心情緒分類標籤** | `neutral` (中立), `joy` (喜悅), `anger` (憤怒),<br>`sadness` (悲傷), `fear` (恐懼), `surprise` (驚訝), `disgust` (厭惡) |
+| **`emotion_score`** | Float | 深度學習模型對該情緒標籤的**預測機率/置信度** | `0.0` 至 `1.0` |
+| **`weighted_vader`** | Float | **互動量加權情感得分**。使用按讚數 (`Likes`) 進行對數縮放加權，用以突顯高曝光度貼文的影響力 | 公式：`vader_compound * ln(1 + Likes)` |
 
 ---
 
-## 🧠 技術細節
+## 🧠 NLP 技術實作說明
 
-### 核心情緒模型
+### 1. 核心情緒分類 (Emotion Classification)
+使用 Hugging Face Transformer 著名的英文情緒分析模型：
 - **模型**：[`j-hartmann/emotion-english-distilroberta-base`](https://huggingface.co/j-hartmann/emotion-english-distilroberta-base)
-- 自動偵測並使用 GPU 加速（支援 CUDA / Apple Silicon MPS / CPU fallback）
+- **硬體**：使用 Apple Silicon GPU (`mps` 裝置) 進行硬體加速推理。
+- **作用**：比傳統的「正/負面」分析更精細，能有效抓出川普是否處於「憤怒 (anger)」或「恐懼 (fear)」等對市場波動影響顯著的情緒。
 
-### 互動加權情感分數
+### 2. 互動加權分數 (Weighted Sentiment)
+若僅使用傳統情感分數，一萬次點讚與一百萬次點讚的推文權重相同，這不符合市場現實。因此引入了：
 $$\text{weighted\_vader} = \text{vader\_compound} \times \ln(1 + \text{Likes})$$
-透過對數縮放排除極端點讚值的影響，合理突顯高曝光貼文的情緒影響力。
+利用對數縮放 (Log scaling) 避免極端點讚數過度放大特徵，同時能合理突顯「熱門貼文」的情緒渲染力。
 
 ---
 
-## 🔗 與 Step 3 對接
+## 📈 推薦後續對接使用方式 (以台股對齊為例)
 
-後續步驟（特徵合併與預測建模）在讀取本步驟的輸出時，請注意：
+若您是接續做金融預測（例如台股時間序列預測）的同學，建議採用以下對齊邏輯：
 
-1. **時區轉換**：`Timestamp` 為 UTC，需轉為台灣時間 `Asia/Taipei`（UTC+8）
-2. **交易日遞延**：下午 13:30 後的發文及假日發文，需**往後遞延**至下一個台灣交易日
-3. **讀取範例**：
+1. **時區轉換**：將 `Timestamp` (UTC) 轉為台灣時間 `Asia/Taipei` (UTC+8)。
+2. **交易日遞延滾動 (Time-shifting)**：
+   - 台灣股市交易時間為 **09:00 ~ 13:30**。
+   - 如果川普發文時間大於 **13:30**（台灣時間），該貼文的情緒影響應**遞延至下一交易日**結算。
+   - 週末及國定假日的發文同樣**遞延至下一開盤日**。
+3. **特徵聚合 (Aggregation)**：
+   - 如果同一交易日有多篇發文，建議：
+     - 情感分數 (`vader_compound`, `weighted_vader`) 取 **平均值 (Mean)**。
+     - 關鍵字 Flag (`kw_china` 等) 與情緒數量 (`emotion_anger` 計數) 取 **總和 (Sum)**。
+     - 每日推文總數 (`post_count`) 作為波動率特徵。
+
+### Python 快速讀取與時區處理範例：
 ```python
 import pandas as pd
 
+# 1. 讀取資料 (mixed 格式確保毫秒解析無誤)
 df = pd.read_csv('trump_posts_features_2017_2026.csv')
-# 必須使用 format='mixed' 以正確解析混合毫秒格式的時間戳
 df['Timestamp'] = pd.to_datetime(df['Timestamp'], utc=True, format='mixed')
+
+# 2. 轉換為台灣時間
 df['Timestamp_CST'] = df['Timestamp'].dt.tz_convert('Asia/Taipei')
+
+# 3. 提取日期與時間
+df['CST_Date'] = df['Timestamp_CST'].dt.date
+df['CST_Time'] = df['Timestamp_CST'].dt.time
+
+print(df[['Timestamp_CST', 'Content', 'weighted_vader']].head())
 ```
+
+---
+*如有任何欄位擴充需求（例如新增其他關鍵字或情緒特徵），可直接參考目錄下的 `extract_nlp_features.py` 修改關鍵字清單並重新執行推理。*

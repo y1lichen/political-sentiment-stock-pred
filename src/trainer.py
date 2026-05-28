@@ -1,7 +1,8 @@
 import torch
 import torch.nn as nn
 import numpy as np
-from torch.utils.data import DataLoader
+import pandas as pd
+from torch.utils.data import DataLoader, Subset
 from .models import DualBranchNet
 from .losses import LogitAdjustedLoss
 from .metrics import compute_f1_scores
@@ -44,14 +45,34 @@ def train_model(model, train_loader, val_loader, optimizer, loss_fn, device, epo
 
     return history
 
+
+def _dates_from_dataset(dataset):
+    if isinstance(dataset, Subset):
+        base_dates = _dates_from_dataset(dataset.dataset)
+        return base_dates[np.asarray(dataset.indices)]
+    if not hasattr(dataset, "sample_index"):
+        raise ValueError("dataset must expose sample_index to align predictions with trading dates.")
+    return pd.DatetimeIndex(dataset.sample_index)
+
+
 def evaluate_predictions(model, data_loader, device):
     model.eval()
-    preds, targets = [], []
+    preds, probas, targets = [], [], []
     with torch.no_grad():
         for market_x, text_x, y in data_loader:
-            preds.append(model(market_x.to(device), text_x.to(device)).argmax(dim=1).cpu().numpy())
+            logits = model(market_x.to(device), text_x.to(device))
+            probas.append(torch.softmax(logits, dim=1).cpu().numpy())
+            preds.append(logits.argmax(dim=1).cpu().numpy())
             targets.append(y.numpy())
-    return np.concatenate(targets), np.concatenate(preds)
+    y_true = np.concatenate(targets)
+    y_pred = np.concatenate(preds)
+    y_proba = np.concatenate(probas)
+    dates = _dates_from_dataset(data_loader.dataset)
+    if len(dates) != len(y_true):
+        raise ValueError(
+            f"prediction date count mismatch: dates={len(dates)} vs y_true={len(y_true)}"
+        )
+    return y_true, y_pred, y_proba, dates
 
 def train_and_eval_ablation(train_subset, val_subset, class_props, device, sample_market, sample_text, zero_text=False):
     model = DualBranchNet(sample_text.shape[0], sample_market.shape[1])
@@ -66,7 +87,7 @@ def train_and_eval_ablation(train_subset, val_subset, class_props, device, sampl
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3, weight_decay=1e-4)
     
     _ = train_model(model, loader_train, loader_val, optimizer, loss_fn, device, epochs=5, verbose=False)
-    y_true, y_pred = evaluate_predictions(model, loader_val, device)
+    y_true, y_pred, y_proba, dates = evaluate_predictions(model, loader_val, device)
     
     if zero_text: train_subset.dataset.text_features = original_text_train
-    return y_true, y_pred
+    return y_true, y_pred, y_proba, dates
