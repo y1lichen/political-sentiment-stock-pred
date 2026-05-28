@@ -1,4 +1,5 @@
 from pathlib import Path
+import random
 import numpy as np
 import pandas as pd
 import torch
@@ -36,7 +37,15 @@ def build_prediction_frame(target, split_idx, model_type, dates, y_true, y_pred,
     )
 
 
-def evaluate_event_binary_predictions(predictions, prices_csv, out_summary):
+def set_seed(seed):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+
+def evaluate_event_binary_predictions(predictions, prices_csv, out_summary, long_threshold=0.58):
     prices = pd.read_csv(prices_csv, index_col=0, parse_dates=True)
     prices.index = pd.to_datetime(prices.index).normalize()
     rows = []
@@ -67,8 +76,11 @@ def evaluate_event_binary_predictions(predictions, prices_csv, out_summary):
 
         close_window = close.iloc[start_pos : end_pos + 2]
         signals = pd.Series(0, index=close_window.index[:-1], dtype=np.int8)
-        # Binary event strategy: predict up -> long for next period; predict down -> cash.
-        event_signals = pd.Series((y_pred_for_bt == 1).astype(np.int8), index=dates_for_bt)
+        group_for_bt = group.loc[valid_date_mask].copy()
+        proba_up_for_bt = group_for_bt["proba_up"].to_numpy(dtype=float)
+        # Binary event strategy: only trade high-confidence up signals.
+        event_signal_values = ((y_pred_for_bt == 1) & (proba_up_for_bt >= long_threshold)).astype(np.int8)
+        event_signals = pd.Series(event_signal_values, index=dates_for_bt)
         signals.loc[event_signals.index] = event_signals
         bt = backtest(close_window, signals)
 
@@ -78,6 +90,8 @@ def evaluate_event_binary_predictions(predictions, prices_csv, out_summary):
             "n_event_predictions": len(group),
             "n_backtest_events": int(valid_date_mask.sum()),
             "n_non_trading_events": int((~valid_date_mask).sum()),
+            "long_threshold": long_threshold,
+            "n_long_signals": int(event_signal_values.sum()),
             "accuracy": accuracy_score(y_true, y_pred),
             "macro_f1": f1_score(y_true, y_pred, average="macro", zero_division=0),
             "precision_down": precision[0],
@@ -91,16 +105,38 @@ def evaluate_event_binary_predictions(predictions, prices_csv, out_summary):
 
     summary = pd.DataFrame(rows)
     summary.to_csv(out_summary, index=False)
+    comparison_path = out_summary.with_name(out_summary.stem + "_comparison.csv")
+    if not summary.empty and {"full_model", "pure_market"}.issubset(set(summary["model_type"])):
+        wide = summary.pivot(index="target", columns="model_type")
+        comparison = pd.DataFrame(
+            {
+                "macro_f1_delta": wide[("macro_f1", "full_model")] - wide[("macro_f1", "pure_market")],
+                "accuracy_delta": wide[("accuracy", "full_model")] - wide[("accuracy", "pure_market")],
+                "return_delta": wide[("cumulative_return", "full_model")] - wide[("cumulative_return", "pure_market")],
+                "sharpe_delta": wide[("sharpe", "full_model")] - wide[("sharpe", "pure_market")],
+                "full_model_return": wide[("cumulative_return", "full_model")],
+                "pure_market_return": wide[("cumulative_return", "pure_market")],
+                "full_model_trades": wide[("n_trades", "full_model")],
+                "pure_market_trades": wide[("n_trades", "pure_market")],
+            }
+        ).reset_index()
+        comparison.to_csv(comparison_path, index=False)
     print(f"✅ 已儲存二元高訊號評估表至 {out_summary}")
+    if comparison_path.exists():
+        print(f"✅ 已儲存 Full-vs-Market 比較表至 {comparison_path}")
     return summary
 
 if __name__ == "__main__":
+    set_seed(42)
     TASK_MODE = "event_binary"  # "event_binary" or "ternary"
     VOLATILITY_WINDOW = 20
     Z_SCORE = 1.25
     EPOCHS = 20
     NUM_CLASSES = 2 if TASK_MODE == "event_binary" else 3
     SPLIT_CONFIG = (300, 80, 80, 80) if TASK_MODE == "event_binary" else (800, 100, 100, 100)
+    HIDDEN_DIM = 64 if TASK_MODE == "event_binary" else 128
+    DROPOUT = 0.35 if TASK_MODE == "event_binary" else 0.2
+    LONG_THRESHOLD = 0.58
     
     base_dir = Path.cwd() 
     text_path = base_dir / "data/text/trump_posts_features_2017_2026.csv"
@@ -167,10 +203,12 @@ if __name__ == "__main__":
             market_y_true, market_only_preds, market_only_proba, market_dates = train_and_eval_ablation(
                 train_subset, val_subset, class_props, device, dataset[0][0], dataset[0][1],
                 zero_text=True, eval_subset=test_subset, epochs=EPOCHS,
+                hidden_dim=HIDDEN_DIM, dropout=DROPOUT,
             )
             y_true, full_model_preds, full_model_proba, full_dates = train_and_eval_ablation(
                 train_subset, val_subset, class_props, device, dataset[0][0], dataset[0][1],
                 zero_text=False, eval_subset=test_subset, epochs=EPOCHS,
+                hidden_dim=HIDDEN_DIM, dropout=DROPOUT, text_gate_bias=-2.0,
             )
 
             if not np.array_equal(market_y_true, y_true):
@@ -222,6 +260,7 @@ if __name__ == "__main__":
                 predictions=predictions,
                 prices_csv=base_dir / "data/taiwan_market_data/global_prices.csv",
                 out_summary=output_dir / "event_binary_summary.csv",
+                long_threshold=LONG_THRESHOLD,
             )
         else:
             evaluate_training_predictions(
