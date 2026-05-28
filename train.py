@@ -52,15 +52,23 @@ def evaluate_event_binary_predictions(predictions, prices_csv, out_summary):
         y_pred = group["pred_label"].to_numpy(dtype=int)
         precision = precision_score(y_true, y_pred, labels=[0, 1], average=None, zero_division=0)
 
-        start_pos = close.index.get_indexer([dates.min()])[0]
-        end_pos = close.index.get_indexer([dates.max()])[0]
-        if start_pos < 0 or end_pos < 0 or end_pos + 1 >= len(close):
+        positions = close.index.get_indexer(dates)
+        valid_date_mask = positions >= 0
+        if not valid_date_mask.any():
+            continue
+        valid_positions = positions[valid_date_mask]
+        dates_for_bt = dates[valid_date_mask]
+        y_pred_for_bt = y_pred[valid_date_mask]
+
+        start_pos = int(valid_positions.min())
+        end_pos = int(valid_positions.max())
+        if end_pos + 1 >= len(close):
             continue
 
         close_window = close.iloc[start_pos : end_pos + 2]
         signals = pd.Series(0, index=close_window.index[:-1], dtype=np.int8)
         # Binary event strategy: predict up -> long for next period; predict down -> cash.
-        event_signals = pd.Series((y_pred == 1).astype(np.int8), index=dates)
+        event_signals = pd.Series((y_pred_for_bt == 1).astype(np.int8), index=dates_for_bt)
         signals.loc[event_signals.index] = event_signals
         bt = backtest(close_window, signals)
 
@@ -68,6 +76,8 @@ def evaluate_event_binary_predictions(predictions, prices_csv, out_summary):
             "target": target,
             "model_type": model_type,
             "n_event_predictions": len(group),
+            "n_backtest_events": int(valid_date_mask.sum()),
+            "n_non_trading_events": int((~valid_date_mask).sum()),
             "accuracy": accuracy_score(y_true, y_pred),
             "macro_f1": f1_score(y_true, y_pred, average="macro", zero_division=0),
             "precision_down": precision[0],
