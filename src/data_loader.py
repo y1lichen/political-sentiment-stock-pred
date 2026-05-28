@@ -300,10 +300,11 @@ class CustomDataset(Dataset):
 
         post_count = daily["post_count"]
         prior_7d_posts = post_count.shift(1).rolling(7, min_periods=1).mean().fillna(0.0)
-        daily["tc_silence_day"] = (post_count == 0).astype(float)
-        daily["tc_post_volume_spike"] = ((post_count > prior_7d_posts * 2.0) & (prior_7d_posts > 0)).astype(float)
-        daily["tc_post_volume_drop"] = ((post_count < prior_7d_posts * 0.4) & (prior_7d_posts > 0)).astype(float)
-        daily["tc_post_count_z7"] = (post_count - prior_7d_posts) / post_count.shift(1).rolling(7, min_periods=2).std().replace(0, 1).fillna(1)
+        derived = pd.DataFrame(index=daily.index)
+        derived["tc_silence_day"] = (post_count == 0).astype(float)
+        derived["tc_post_volume_spike"] = ((post_count > prior_7d_posts * 2.0) & (prior_7d_posts > 0)).astype(float)
+        derived["tc_post_volume_drop"] = ((post_count < prior_7d_posts * 0.4) & (prior_7d_posts > 0)).astype(float)
+        derived["tc_post_count_z7"] = (post_count - prior_7d_posts) / post_count.shift(1).rolling(7, min_periods=2).std().replace(0, 1).fillna(1)
 
         tariff_col = "tc_tariff_sum"
         deal_col = "tc_deal_sum"
@@ -311,16 +312,18 @@ class CustomDataset(Dataset):
         action_col = "tc_action_sum"
         positive_col = "tc_positive_sum"
         if tariff_col in daily.columns:
-            daily["tc_tariff_streak_3d"] = (daily[tariff_col].rolling(3, min_periods=1).sum() >= 3).astype(float)
-            daily["tc_tariff_rising"] = ((daily[tariff_col] > 0) & (daily[tariff_col].shift(1).rolling(3, min_periods=1).sum() >= 2)).astype(float)
+            derived["tc_tariff_streak_3d"] = (daily[tariff_col].rolling(3, min_periods=1).sum() >= 3).astype(float)
+            derived["tc_tariff_rising"] = ((daily[tariff_col] > 0) & (daily[tariff_col].shift(1).rolling(3, min_periods=1).sum() >= 2)).astype(float)
         if deal_col in daily.columns and tariff_col in daily.columns:
-            daily["tc_deal_over_tariff_day"] = ((daily[deal_col] > daily[tariff_col]) & (daily[deal_col] > 0)).astype(float)
-            daily["tc_tariff_only_day"] = ((daily[tariff_col] > 0) & (daily[deal_col] == 0)).astype(float)
+            derived["tc_deal_over_tariff_day"] = ((daily[deal_col] > daily[tariff_col]) & (daily[deal_col] > 0)).astype(float)
+            derived["tc_tariff_only_day"] = ((daily[tariff_col] > 0) & (daily[deal_col] == 0)).astype(float)
         if relief_col in daily.columns and positive_col in daily.columns:
-            daily["tc_relief_positive_day"] = ((daily[relief_col] > 0) & (daily[positive_col] > 0)).astype(float)
+            derived["tc_relief_positive_day"] = ((daily[relief_col] > 0) & (daily[positive_col] > 0)).astype(float)
         if action_col in daily.columns and positive_col in daily.columns:
-            daily["tc_action_positive_day"] = ((daily[action_col] > 0) & (daily[positive_col] > 0)).astype(float)
+            derived["tc_action_positive_day"] = ((daily[action_col] > 0) & (daily[positive_col] > 0)).astype(float)
 
+        daily = pd.concat([daily, derived], axis=1)
+        daily = daily.select_dtypes(include=[np.number, "bool"])
         return daily.replace([np.inf, -np.inf], 0.0).astype(np.float32)
 
     def _aggregate_text_features(self, text_df, text_feature_cols, text_timestamp_col, text_timezone, market_timezone, market_open_time, market_close_time, aggregation, weight_col) -> pd.DataFrame:
