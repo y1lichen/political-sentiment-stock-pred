@@ -28,6 +28,7 @@ def build_prediction_frame(target, split_idx, model_type, dates, y_true, y_pred,
 if __name__ == "__main__":
     VOLATILITY_WINDOW = 20
     Z_SCORE = 1.25
+    EPOCHS = 20
     
     base_dir = Path.cwd() 
     text_path = base_dir / "data/text/trump_posts_features_2017_2026.csv"
@@ -59,6 +60,8 @@ if __name__ == "__main__":
         dataset = CustomDataset(
             market_df=market_df, text_df=text_df, window_size=20,
             close_price_col=f"close_{target_ticker}", open_price_col=f"close_{target_ticker}", 
+            volatility_window=VOLATILITY_WINDOW, z_score=Z_SCORE,
+            aggregation="trumpcode_daily",
         )
 
         splits = expanding_window_walk_forward(dataset.sample_index, 800, 100, 100, 100)
@@ -75,6 +78,7 @@ if __name__ == "__main__":
         for split_idx, split in enumerate(splits, start=1):
             train_subset = torch.utils.data.Subset(dataset, split.train_idx)
             val_subset = torch.utils.data.Subset(dataset, split.val_idx)
+            test_subset = torch.utils.data.Subset(dataset, split.test_idx)
             
             # 標準化處理 (Standardization)
             market_train = raw_market_features[dataset.valid_indices[split.train_idx]]
@@ -86,10 +90,12 @@ if __name__ == "__main__":
             print(f"-- Split {split_idx} --")
             
             market_y_true, market_only_preds, market_only_proba, market_dates = train_and_eval_ablation(
-                train_subset, val_subset, class_props, device, dataset[0][0], dataset[0][1], zero_text=True
+                train_subset, val_subset, class_props, device, dataset[0][0], dataset[0][1],
+                zero_text=True, eval_subset=test_subset, epochs=EPOCHS,
             )
             y_true, full_model_preds, full_model_proba, full_dates = train_and_eval_ablation(
-                train_subset, val_subset, class_props, device, dataset[0][0], dataset[0][1], zero_text=False
+                train_subset, val_subset, class_props, device, dataset[0][0], dataset[0][1],
+                zero_text=False, eval_subset=test_subset, epochs=EPOCHS,
             )
 
             if not np.array_equal(market_y_true, y_true):

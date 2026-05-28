@@ -1,3 +1,4 @@
+import copy
 import torch
 import torch.nn as nn
 import numpy as np
@@ -7,9 +8,11 @@ from .models import DualBranchNet
 from .losses import LogitAdjustedLoss
 from .metrics import compute_f1_scores
 
-def train_model(model, train_loader, val_loader, optimizer, loss_fn, device, epochs=20, grad_clip=1.0, verbose=True):
+def train_model(model, train_loader, val_loader, optimizer, loss_fn, device, epochs=20, grad_clip=1.0, verbose=True, restore_best=True):
     history = {"train_loss": [], "val_loss": [], "val_macro_f1": []}
     model.to(device)
+    best_score = -1.0
+    best_state = None
 
     for epoch in range(1, epochs + 1):
         model.train()
@@ -40,9 +43,14 @@ def train_model(model, train_loader, val_loader, optimizer, loss_fn, device, epo
         history["train_loss"].append(total_loss / max(1, total_count))
         history["val_loss"].append(val_loss / max(1, val_count))
         history["val_macro_f1"].append(compute_f1_scores(y_true, y_pred) if y_true.size else 0.0)
+        if history["val_macro_f1"][-1] > best_score:
+            best_score = history["val_macro_f1"][-1]
+            best_state = copy.deepcopy(model.state_dict())
 
         if verbose: print(f"Epoch {epoch:02d}/{epochs} | train_loss={history['train_loss'][-1]:.4f} | val_loss={history['val_loss'][-1]:.4f} | val_f1={history['val_macro_f1'][-1]:.4f}")
 
+    if restore_best and best_state is not None:
+        model.load_state_dict(best_state)
     return history
 
 
@@ -74,10 +82,12 @@ def evaluate_predictions(model, data_loader, device):
         )
     return y_true, y_pred, y_proba, dates
 
-def train_and_eval_ablation(train_subset, val_subset, class_props, device, sample_market, sample_text, zero_text=False):
-    model = DualBranchNet(sample_text.shape[0], sample_market.shape[1])
+def train_and_eval_ablation(train_subset, val_subset, class_props, device, sample_market, sample_text, zero_text=False, eval_subset=None, epochs=20):
+    text_dim = sample_text.shape[-1]
+    model = DualBranchNet(text_dim, sample_market.shape[-1])
     loader_train = DataLoader(train_subset, batch_size=64, shuffle=True, drop_last=True)
     loader_val = DataLoader(val_subset, batch_size=64, shuffle=False)
+    loader_eval = DataLoader(eval_subset if eval_subset is not None else val_subset, batch_size=64, shuffle=False)
 
     if zero_text:
         original_text_train = train_subset.dataset.text_features.copy()
@@ -86,8 +96,8 @@ def train_and_eval_ablation(train_subset, val_subset, class_props, device, sampl
     loss_fn = LogitAdjustedLoss(class_priors=class_props, tau=0.75).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3, weight_decay=1e-4)
     
-    _ = train_model(model, loader_train, loader_val, optimizer, loss_fn, device, epochs=5, verbose=False)
-    y_true, y_pred, y_proba, dates = evaluate_predictions(model, loader_val, device)
+    _ = train_model(model, loader_train, loader_val, optimizer, loss_fn, device, epochs=epochs, verbose=False)
+    y_true, y_pred, y_proba, dates = evaluate_predictions(model, loader_eval, device)
     
     if zero_text: train_subset.dataset.text_features = original_text_train
     return y_true, y_pred, y_proba, dates

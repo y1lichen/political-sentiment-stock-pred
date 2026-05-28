@@ -1,8 +1,11 @@
-import pandas as pd
-import re
-import os
+import argparse
 import math
+import os
+import re
+from pathlib import Path
+
 import numpy as np
+import pandas as pd
 import torch
 
 from tqdm import tqdm
@@ -26,10 +29,14 @@ def get_device():
 # Keyword Extraction
 # ============================================================
 
+def _has(pattern, text_lower):
+    return int(bool(re.search(pattern, text_lower)))
+
+
 def extract_keywords(text):
     text_lower = text.lower()
 
-    return {
+    keywords = {
 
         'kw_china': int(bool(re.search(
             r'\bchina\b|\bchinese\b|\bccp\b|\bbeijing\b|'
@@ -93,6 +100,24 @@ def extract_keywords(text):
             text_lower
         )))
     }
+
+    # Trump-code style event families. These are deliberately broad lexical
+    # hooks; the neural model learns whether a hook is useful for each asset.
+    keywords.update({
+        "tc_tariff": _has(r"\btariffs?\b|\bdut(?:y|ies)\b|\btrade war\b|\bsection 301\b", text_lower),
+        "tc_deal": _has(r"\bdeal\b|\bagreement\b|\bsigned\b|\bnegotiate|negotiation\b|\bframework\b", text_lower),
+        "tc_relief": _has(r"\bpause\b|\bexempt|exemption\b|\bsuspend\b|\bdelay\b|\bextend\b|\bwaiver\b", text_lower),
+        "tc_action": _has(r"\bimmediately\b|\bhereby\b|\bexecutive order\b|\bjust signed\b|\bordered\b", text_lower),
+        "tc_attack": _has(r"\bfake news\b|\bcorrupt\b|\bfraud\b|\bwitch hunt\b|\bterrible\b|\bdisaster\b", text_lower),
+        "tc_positive": _has(r"\bgreat\b|\btremendous\b|\bincredible\b|\bhistoric\b|\bbeautiful\b|\bperfect\b|\bstrong\b", text_lower),
+        "tc_market_brag": _has(r"\bstock market\b|\ball[- ]time high\b|\brecord high\b|\bdow\b|\bs&p\b|\bnasdaq\b", text_lower),
+        "tc_iran": _has(r"\biran\b|\biranian\b", text_lower),
+        "tc_russia": _has(r"\brussia\b|\bputin\b|\bukraine\b", text_lower),
+        "tc_fed": _has(r"\bfed\b|\bfederal reserve\b|\bpowell\b|\brate cut\b|\binterest rates?\b", text_lower),
+        "tc_energy": _has(r"\boil\b|\bgas\b|\benergy\b|\bopec\b|\bdrill\b", text_lower),
+    })
+
+    return keywords
 
 
 # ============================================================
@@ -176,6 +201,10 @@ def extract_event_features(text):
         + repeated_exclamation * 3
     )
 
+    alpha_count = sum(1 for ch in text_str if ch.isalpha())
+    upper_count = sum(1 for ch in text_str if ch.isupper())
+    uppercase_char_ratio = upper_count / max(1, alpha_count)
+
     return {
 
         "char_count": char_count,
@@ -183,6 +212,7 @@ def extract_event_features(text):
         "avg_word_length": avg_word_length,
 
         "caps_ratio": caps_ratio,
+        "uppercase_char_ratio": uppercase_char_ratio,
 
         "exclamation_count": exclamation_count,
         "question_count": question_count,
@@ -209,30 +239,112 @@ def extract_event_features(text):
 
 def extract_time_features(timestamp):
 
-    ts = pd.to_datetime(timestamp)
+    ts = pd.to_datetime(timestamp, utc=True)
+    ts_et = ts.tz_convert("America/New_York")
+    ts_tw = ts.tz_convert("Asia/Taipei")
 
     hour = ts.hour
+    et_hour = ts_et.hour
+    et_minute = ts_et.minute
 
     return {
 
         "post_hour": hour,
 
         "post_dayofweek": ts.dayofweek,
+        "post_hour_et": et_hour,
+        "post_dayofweek_et": ts_et.dayofweek,
+        "post_hour_tw": ts_tw.hour,
 
         "is_weekend": int(ts.dayofweek >= 5),
 
         "is_night_post": int(
-            hour >= 0 and hour <= 5
+            et_hour <= 5 or et_hour >= 23
         ),
 
         "is_market_hours": int(
-            9 <= hour <= 16
+            (et_hour > 9 or (et_hour == 9 and et_minute >= 30)) and et_hour < 16
         ),
+        "is_pre_market": int(et_hour < 9 or (et_hour == 9 and et_minute < 30)),
 
         "is_after_market": int(
-            16 < hour <= 20
+            16 <= et_hour <= 20
         )
     }
+
+
+def extract_signature_features(text):
+    text_str = str(text)
+    return {
+        "sig_djt": int("President DJT" in text_str),
+        "sig_potus": int("PRESIDENT OF THE UNITED STATES" in text_str),
+        "sig_tyfa": int("Thank you for your attention" in text_str),
+        "is_retweet_text": int(text_str.strip().lower().startswith("rt ")),
+    }
+
+
+def build_trumpcode_scores(row):
+    tariff = row["tc_tariff"]
+    deal = row["tc_deal"]
+    relief = row["tc_relief"]
+    action = row["tc_action"]
+    positive = row["tc_positive"]
+    attack = row["tc_attack"]
+    market_brag = row["tc_market_brag"]
+
+    row["tc_pre_tariff"] = int(row["is_pre_market"] and tariff)
+    row["tc_pre_deal"] = int(row["is_pre_market"] and deal)
+    row["tc_pre_relief"] = int(row["is_pre_market"] and relief)
+    row["tc_pre_action"] = int(row["is_pre_market"] and action)
+    row["tc_open_tariff"] = int(row["is_market_hours"] and tariff)
+    row["tc_open_deal"] = int(row["is_market_hours"] and deal)
+    row["tc_night_tariff"] = int(row["is_night_post"] and tariff)
+
+    row["tc_deal_over_tariff_post"] = int(deal and not tariff)
+    row["tc_tariff_only_post"] = int(tariff and not deal)
+    row["tc_relief_positive_post"] = int(relief and positive)
+    row["tc_attack_market_post"] = int(attack and market_brag)
+
+    row["tc_directional_pressure"] = (
+        1.5 * relief
+        + 1.0 * deal
+        + 0.8 * action
+        + 0.6 * positive
+        - 1.4 * tariff
+        - 0.7 * attack
+        - 0.6 * row["tc_night_tariff"]
+    )
+    row["tc_event_intensity"] = (
+        row["tc_tariff"]
+        + row["tc_deal"]
+        + row["tc_relief"]
+        + row["tc_action"]
+        + row["tc_attack"]
+        + row["tc_market_brag"]
+        + row.get("kw_china", 0)
+        + row.get("kw_taiwan", 0)
+        + row.get("kw_chips", 0)
+    )
+    return row
+
+
+def resolve_paths(input_file, output_file):
+    base = Path(__file__).resolve().parent
+    input_path = Path(input_file)
+    output_path = Path(output_file)
+    if not input_path.is_absolute():
+        candidates = [
+            Path.cwd() / input_path,
+            base / input_path,
+            base / "merged_trump_posts.csv",
+            base / "trump_truth_social_posts.csv",
+            base.parent / "text" / "trump_posts_features_2017_2026.csv",
+        ]
+        input_path = next((p for p in candidates if p.exists()), candidates[0])
+    if not output_path.is_absolute():
+        output_path = base.parent / "text" / output_path
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    return input_path, output_path
 
 
 # ============================================================
@@ -241,10 +353,17 @@ def extract_time_features(timestamp):
 
 def main():
 
-    input_file = "merged_trump_posts.csv"
-    output_file = "trump_posts_features_2017_2026.csv"
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--input", default="merged_trump_posts.csv")
+    parser.add_argument("--output", default="trump_posts_features_2017_2026.csv")
+    parser.add_argument("--checkpoint-interval", type=int, default=500)
+    parser.add_argument("--skip-emotion-model", action="store_true")
+    parser.add_argument("--force", action="store_true")
+    args = parser.parse_args()
 
-    checkpoint_interval = 500
+    input_file, output_file = resolve_paths(args.input, args.output)
+
+    checkpoint_interval = args.checkpoint_interval
 
     print(f"Loading {input_file}")
 
@@ -256,7 +375,7 @@ def main():
     # Resume checkpoint
     # ========================================================
 
-    if os.path.exists(output_file):
+    if os.path.exists(output_file) and not args.force:
 
         print(f"Found checkpoint: {output_file}")
 
@@ -288,13 +407,15 @@ def main():
 
     analyzer = SentimentIntensityAnalyzer()
 
-    emotion_classifier = pipeline(
-        "text-classification",
-        model="j-hartmann/emotion-english-distilroberta-base",
-        device=get_device(),
-        truncation=True,
-        max_length=512
-    )
+    emotion_classifier = None
+    if not args.skip_emotion_model:
+        emotion_classifier = pipeline(
+            "text-classification",
+            model="j-hartmann/emotion-english-distilroberta-base",
+            device=get_device(),
+            truncation=True,
+            max_length=512
+        )
 
     # ========================================================
     # Feature extraction
@@ -332,6 +453,8 @@ def main():
 
         row.update(time_features)
 
+        row.update(extract_signature_features(text))
+
         # ====================================================
         # VADER Sentiment
         # ====================================================
@@ -351,6 +474,9 @@ def main():
         # ====================================================
 
         try:
+
+            if emotion_classifier is None:
+                raise RuntimeError("emotion model skipped")
 
             emotion_res = emotion_classifier(text)
 
@@ -433,6 +559,8 @@ def main():
             + row["viral_score"]
             + keyword_sum
         )
+
+        row = build_trumpcode_scores(row)
 
         df_out.append(row)
 
