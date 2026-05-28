@@ -89,3 +89,39 @@ print(df[['Timestamp_CST', 'Content', 'weighted_vader']].head())
 
 ---
 *如有任何欄位擴充需求（例如新增其他關鍵字或情緒特徵），可直接參考目錄下的 `extract_nlp_features.py` 修改關鍵字清單並重新執行推理。*
+
+
+## 🚀 如何執行
+
+### 環境需求
+```bash
+pip install transformers torch pandas vaderSentiment nltk tqdm
+```
+> 執行前請先完成 NLTK VADER 字典的初次下載：
+> ```python
+> import nltk; nltk.download('vader_lexicon')
+> ```
+
+### 執行順序
+
+**Step 2-1：爬取 Truth Social 資料**
+```bash
+python scrape_truth_social.py
+```
+- 輸出：`trump_truth_social_posts.csv`
+
+**Step 2-2：合併資料集**
+```bash
+python merge_datasets.py
+```
+- 輸入：`tweets.csv`（Twitter 歷史，請自行取得）、`trump_truth_social_posts.csv`
+- 輸出：`merged_trump_posts.csv`（共 70,730 筆）
+
+**Step 2-3：執行 NLP 特徵萃取**
+```bash
+python extract_nlp_features.py
+```
+- 輸入：`merged_trump_posts.csv`
+- 輸出：`trump_posts_features_2017_2026.csv`
+- ⏱️ 預計執行時間：約 25–30 分鐘（使用 Apple Silicon MPS GPU 加速）或 40–60 分鐘（CPU）
+- 🔁 支援**斷點續傳**：若中途中斷，重新執行會從上次存檔位置繼續
