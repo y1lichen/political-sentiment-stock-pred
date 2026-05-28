@@ -9,8 +9,15 @@ import pandas as pd
 import torch
 
 from tqdm import tqdm
-from nltk.sentiment.vader import SentimentIntensityAnalyzer
-from transformers import pipeline
+try:
+    from nltk.sentiment.vader import SentimentIntensityAnalyzer
+except ImportError:
+    SentimentIntensityAnalyzer = None
+
+try:
+    from transformers import pipeline
+except ImportError:
+    pipeline = None
 
 
 # ============================================================
@@ -336,13 +343,14 @@ def resolve_paths(input_file, output_file):
         candidates = [
             Path.cwd() / input_path,
             base / input_path,
+            base / "trump_posts_features_2017_2026.csv",
             base / "merged_trump_posts.csv",
             base / "trump_truth_social_posts.csv",
             base.parent / "text" / "trump_posts_features_2017_2026.csv",
         ]
         input_path = next((p for p in candidates if p.exists()), candidates[0])
     if not output_path.is_absolute():
-        output_path = base.parent / "text" / output_path
+        output_path = base / output_path
     output_path.parent.mkdir(parents=True, exist_ok=True)
     return input_path, output_path
 
@@ -358,6 +366,7 @@ def main():
     parser.add_argument("--output", default="trump_posts_features_2017_2026.csv")
     parser.add_argument("--checkpoint-interval", type=int, default=500)
     parser.add_argument("--skip-emotion-model", action="store_true")
+    parser.add_argument("--reuse-existing-nlp", action="store_true")
     parser.add_argument("--force", action="store_true")
     args = parser.parse_args()
 
@@ -405,10 +414,17 @@ def main():
 
     print(f"Loading models on device: {get_device()}")
 
-    analyzer = SentimentIntensityAnalyzer()
+    if args.reuse_existing_nlp:
+        analyzer = None
+    else:
+        if SentimentIntensityAnalyzer is None:
+            raise ImportError("nltk is required unless --reuse-existing-nlp is used.")
+        analyzer = SentimentIntensityAnalyzer()
 
     emotion_classifier = None
-    if not args.skip_emotion_model:
+    if not args.skip_emotion_model and not args.reuse_existing_nlp:
+        if pipeline is None:
+            raise ImportError("transformers is required unless --skip-emotion-model or --reuse-existing-nlp is used.")
         emotion_classifier = pipeline(
             "text-classification",
             model="j-hartmann/emotion-english-distilroberta-base",
@@ -459,7 +475,15 @@ def main():
         # VADER Sentiment
         # ====================================================
 
-        scores = analyzer.polarity_scores(text)
+        if analyzer is None and "vader_compound" in row:
+            scores = {
+                "compound": float(row.get("vader_compound", 0.0) or 0.0),
+                "pos": float(row.get("vader_pos", 0.0) or 0.0),
+                "neg": float(row.get("vader_neg", 0.0) or 0.0),
+                "neu": float(row.get("vader_neu", 0.0) or 0.0),
+            }
+        else:
+            scores = analyzer.polarity_scores(text)
 
         row["vader_compound"] = scores["compound"]
 
@@ -475,6 +499,11 @@ def main():
 
         try:
 
+            if args.reuse_existing_nlp and "emotion_label" in row and "emotion_score" in row:
+                row["emotion_label"] = row.get("emotion_label", "unknown")
+                row["emotion_score"] = float(row.get("emotion_score", 0.0) or 0.0)
+                raise StopIteration
+
             if emotion_classifier is None:
                 raise RuntimeError("emotion model skipped")
 
@@ -484,11 +513,15 @@ def main():
 
             row["emotion_score"] = emotion_res[0]["score"]
 
+        except StopIteration:
+            pass
+
         except Exception:
 
-            row["emotion_label"] = "unknown"
+            if not args.reuse_existing_nlp:
+                row["emotion_label"] = "unknown"
 
-            row["emotion_score"] = 0.0
+                row["emotion_score"] = 0.0
 
         # ====================================================
         # Engagement Features
@@ -519,10 +552,13 @@ def main():
         )
 
         # weighted sentiment
-        row["weighted_vader"] = (
-            scores["compound"]
-            * row["engagement_score"]
-        )
+        if args.reuse_existing_nlp and "weighted_vader" in row and not pd.isna(row["weighted_vader"]):
+            row["weighted_vader"] = float(row["weighted_vader"])
+        else:
+            row["weighted_vader"] = (
+                scores["compound"]
+                * row["engagement_score"]
+            )
 
         # ====================================================
         # Viral / anomaly signals
