@@ -2,15 +2,25 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import torch
+from sklearn.metrics import accuracy_score, f1_score, precision_score
 
 # 從我們建立的模組中引入功能
 from src.data_loader import prepare_text_dataframe, load_market_features, CustomDataset, expanding_window_walk_forward
 from src.metrics import compute_f1_scores, test_incremental_power
 from src.trainer import train_and_eval_ablation
+from evaluation.backtest import backtest
 from evaluation.training_outputs import evaluate_training_predictions
 
 
 def build_prediction_frame(target, split_idx, model_type, dates, y_true, y_pred, y_proba):
+    if y_proba.shape[1] == 2:
+        proba_down = y_proba[:, 0]
+        proba_flat = np.zeros_like(proba_down)
+        proba_up = y_proba[:, 1]
+    else:
+        proba_down = y_proba[:, 0]
+        proba_flat = y_proba[:, 1]
+        proba_up = y_proba[:, 2]
     return pd.DataFrame(
         {
             "target": target,
@@ -18,17 +28,69 @@ def build_prediction_frame(target, split_idx, model_type, dates, y_true, y_pred,
             "date": pd.DatetimeIndex(dates).strftime("%Y-%m-%d"),
             "y_true": y_true.astype(int),
             "pred_label": y_pred.astype(int),
-            "proba_down": y_proba[:, 0],
-            "proba_flat": y_proba[:, 1],
-            "proba_up": y_proba[:, 2],
+            "proba_down": proba_down,
+            "proba_flat": proba_flat,
+            "proba_up": proba_up,
             "model_type": model_type,
         }
     )
 
+
+def evaluate_event_binary_predictions(predictions, prices_csv, out_summary):
+    prices = pd.read_csv(prices_csv, index_col=0, parse_dates=True)
+    prices.index = pd.to_datetime(prices.index).normalize()
+    rows = []
+
+    for (target, model_type), group in predictions.groupby(["target", "model_type"]):
+        group = group.sort_values("date").copy()
+        close = prices[target].dropna()
+        dates = pd.DatetimeIndex(pd.to_datetime(group["date"]).dt.normalize())
+        if len(dates) == 0:
+            continue
+
+        y_true = group["y_true"].to_numpy(dtype=int)
+        y_pred = group["pred_label"].to_numpy(dtype=int)
+        precision = precision_score(y_true, y_pred, labels=[0, 1], average=None, zero_division=0)
+
+        start_pos = close.index.get_indexer([dates.min()])[0]
+        end_pos = close.index.get_indexer([dates.max()])[0]
+        if start_pos < 0 or end_pos < 0 or end_pos + 1 >= len(close):
+            continue
+
+        close_window = close.iloc[start_pos : end_pos + 2]
+        signals = pd.Series(0, index=close_window.index[:-1], dtype=np.int8)
+        # Binary event strategy: predict up -> long for next period; predict down -> cash.
+        event_signals = pd.Series((y_pred == 1).astype(np.int8), index=dates)
+        signals.loc[event_signals.index] = event_signals
+        bt = backtest(close_window, signals)
+
+        rows.append({
+            "target": target,
+            "model_type": model_type,
+            "n_event_predictions": len(group),
+            "accuracy": accuracy_score(y_true, y_pred),
+            "macro_f1": f1_score(y_true, y_pred, average="macro", zero_division=0),
+            "precision_down": precision[0],
+            "precision_up": precision[1],
+            "hit_rate": float((y_true == y_pred).mean()),
+            "cumulative_return": bt["cumulative_return"],
+            "sharpe": bt["sharpe"],
+            "max_drawdown": bt["max_drawdown"],
+            "n_trades": bt["n_trades"],
+        })
+
+    summary = pd.DataFrame(rows)
+    summary.to_csv(out_summary, index=False)
+    print(f"✅ 已儲存二元高訊號評估表至 {out_summary}")
+    return summary
+
 if __name__ == "__main__":
+    TASK_MODE = "event_binary"  # "event_binary" or "ternary"
     VOLATILITY_WINDOW = 20
     Z_SCORE = 1.25
     EPOCHS = 20
+    NUM_CLASSES = 2 if TASK_MODE == "event_binary" else 3
+    SPLIT_CONFIG = (300, 80, 80, 80) if TASK_MODE == "event_binary" else (800, 100, 100, 100)
     
     base_dir = Path.cwd() 
     text_path = base_dir / "data/text/trump_posts_features_2017_2026.csv"
@@ -62,13 +124,16 @@ if __name__ == "__main__":
             close_price_col=f"close_{target_ticker}", open_price_col=f"close_{target_ticker}", 
             volatility_window=VOLATILITY_WINDOW, z_score=Z_SCORE,
             aggregation="trumpcode_daily",
+            label_mode=TASK_MODE,
+            high_signal_only=(TASK_MODE == "event_binary"),
+            signal_intensity_threshold=2.0,
         )
 
-        splits = expanding_window_walk_forward(dataset.sample_index, 800, 100, 100, 100)
+        splits = expanding_window_walk_forward(dataset.sample_index, *SPLIT_CONFIG)
         print(f"\n=== Target {target_ticker} ===")
         
         if not splits:
-            print(f"   [警告] {target_ticker} 有效資料天數({len(dataset.sample_index)})不足切分標準(最少1000天)。略過此標的。")
+            print(f"   [警告] {target_ticker} 有效資料天數({len(dataset.sample_index)})不足切分標準。略過此標的。")
             continue
 
         raw_market_features = dataset.market_features.copy()
@@ -86,7 +151,7 @@ if __name__ == "__main__":
             text_train = raw_text_features[dataset.valid_indices[split.train_idx]]
             dataset.text_features = (raw_text_features - text_train.mean(axis=0)) / np.where(text_train.std(axis=0) < 1e-8, 1.0, text_train.std(axis=0))
 
-            class_props = np.bincount(dataset.labels[dataset.valid_indices[split.train_idx]].astype(int), minlength=3) / max(1, len(split.train_idx))
+            class_props = np.bincount(dataset.labels[dataset.valid_indices[split.train_idx]].astype(int), minlength=NUM_CLASSES) / max(1, len(split.train_idx))
             print(f"-- Split {split_idx} --")
             
             market_y_true, market_only_preds, market_only_proba, market_dates = train_and_eval_ablation(
@@ -139,11 +204,19 @@ if __name__ == "__main__":
         print(f"✅ 已儲存分模型訓練指標至 {output_dir / 'training_metrics_by_model.csv'}")
     if prediction_frames:
         predictions_path = output_dir / "training_predictions.csv"
-        pd.concat(prediction_frames, ignore_index=True).to_csv(predictions_path, index=False)
+        predictions = pd.concat(prediction_frames, ignore_index=True)
+        predictions.to_csv(predictions_path, index=False)
         print(f"✅ 已儲存模型預測至 {predictions_path}")
-        evaluate_training_predictions(
-            predictions_path=predictions_path,
-            prices_csv=base_dir / "data/taiwan_market_data/global_prices.csv",
-            out_summary=output_dir / "evaluation_summary.csv",
-            out_cm_dir=output_dir / "confusion_matrices",
-        )
+        if TASK_MODE == "event_binary":
+            evaluate_event_binary_predictions(
+                predictions=predictions,
+                prices_csv=base_dir / "data/taiwan_market_data/global_prices.csv",
+                out_summary=output_dir / "event_binary_summary.csv",
+            )
+        else:
+            evaluate_training_predictions(
+                predictions_path=predictions_path,
+                prices_csv=base_dir / "data/taiwan_market_data/global_prices.csv",
+                out_summary=output_dir / "evaluation_summary.csv",
+                out_cm_dir=output_dir / "confusion_matrices",
+            )

@@ -84,7 +84,7 @@ def evaluate_predictions(model, data_loader, device):
 
 def train_and_eval_ablation(train_subset, val_subset, class_props, device, sample_market, sample_text, zero_text=False, eval_subset=None, epochs=20):
     text_dim = sample_text.shape[-1]
-    model = DualBranchNet(text_dim, sample_market.shape[-1])
+    model = DualBranchNet(text_dim, sample_market.shape[-1], num_classes=len(class_props))
     loader_train = DataLoader(train_subset, batch_size=64, shuffle=True, drop_last=True)
     loader_val = DataLoader(val_subset, batch_size=64, shuffle=False)
     loader_eval = DataLoader(eval_subset if eval_subset is not None else val_subset, batch_size=64, shuffle=False)

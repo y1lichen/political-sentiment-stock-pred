@@ -11,13 +11,13 @@ class GatedFusion(nn.Module):
         return g * text_feat + (1 - g) * market_feat
 
 class DualBranchNet(nn.Module):
-    def __init__(self, text_dim: int, market_dim: int, hidden_dim: int = 128, lstm_layers: int = 1, dropout: float = 0.2):
+    def __init__(self, text_dim: int, market_dim: int, hidden_dim: int = 128, lstm_layers: int = 1, dropout: float = 0.2, num_classes: int = 3):
         super().__init__()
         self.text_lstm = nn.LSTM(input_size=text_dim, hidden_size=hidden_dim, num_layers=lstm_layers, batch_first=True, dropout=dropout if lstm_layers > 1 else 0.0)
         self.text_head = nn.Sequential(nn.LayerNorm(hidden_dim), nn.ReLU(), nn.Dropout(dropout))
         self.market_lstm = nn.LSTM(input_size=market_dim, hidden_size=hidden_dim, num_layers=lstm_layers, batch_first=True, dropout=dropout if lstm_layers > 1 else 0.0)
         self.fusion = GatedFusion(hidden_dim)
-        self.fusion_head = nn.Sequential(nn.Linear(hidden_dim, hidden_dim // 2), nn.ReLU(), nn.Dropout(dropout), nn.Linear(hidden_dim // 2, 3))
+        self.fusion_head = nn.Sequential(nn.Linear(hidden_dim, hidden_dim // 2), nn.ReLU(), nn.Dropout(dropout), nn.Linear(hidden_dim // 2, num_classes))
 
     def forward(self, market_x: torch.Tensor, text_x: torch.Tensor) -> torch.Tensor:
         if text_x.dim() == 2:

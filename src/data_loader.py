@@ -176,6 +176,8 @@ class CustomDataset(Dataset):
         weight_col: Optional[str] = "Likes", label_series: Optional[pd.Series] = None,
         close_price_col: Optional[str] = None, open_price_col: Optional[str] = None,
         volatility_window: int = 20, z_score: float = 1.0,
+        label_mode: str = "ternary", high_signal_only: bool = False,
+        signal_intensity_threshold: float = 2.0,
     ) -> None:
         if window_size < 2: raise ValueError("window_size must be >= 2")
         self.window_size = window_size
@@ -196,7 +198,12 @@ class CustomDataset(Dataset):
         if label_series is None:
             if close_price_col is None: raise ValueError("close_price_col must be provided.")
             open_series = market_df[open_price_col] if open_price_col in market_df.columns else market_df[close_price_col]
-            label_series = self._build_dynamic_gap_labels(market_df[close_price_col], open_series, volatility_window, z_score)
+            if label_mode == "event_binary":
+                label_series = self._build_binary_direction_labels(market_df[close_price_col], open_series)
+            elif label_mode == "ternary":
+                label_series = self._build_dynamic_gap_labels(market_df[close_price_col], open_series, volatility_window, z_score)
+            else:
+                raise ValueError(f"unknown label_mode: {label_mode}")
         label_series = label_series.reindex(self.trading_index)
         self.labels = label_series.to_numpy()
 
@@ -208,6 +215,8 @@ class CustomDataset(Dataset):
         self.text_features = text_daily.to_numpy(dtype=np.float32)
 
         valid_mask = ~pd.isna(self.labels)
+        if high_signal_only:
+            valid_mask &= self._build_high_signal_mask(text_daily, signal_intensity_threshold)
         valid_indices = np.where(valid_mask)[0]
         self.valid_indices = valid_indices[valid_indices >= (window_size - 1)]
         self.sample_index = self.trading_index[self.valid_indices]
@@ -222,6 +231,34 @@ class CustomDataset(Dataset):
         labels[(gap_returns >= -threshold) & (gap_returns <= threshold)] = 1
         labels[gap_returns > threshold] = 2
         return labels
+
+    @staticmethod
+    def _build_binary_direction_labels(close_series: pd.Series, open_series: pd.Series) -> pd.Series:
+        next_returns = (open_series.shift(-1) - close_series) / close_series
+        labels = pd.Series(index=close_series.index, dtype="float32")
+        labels[next_returns < 0] = 0
+        labels[next_returns >= 0] = 1
+        labels[next_returns.isna()] = np.nan
+        return labels
+
+    @staticmethod
+    def _build_high_signal_mask(text_daily: pd.DataFrame, signal_intensity_threshold: float) -> np.ndarray:
+        critical_cols = [
+            "tc_pre_tariff_sum", "tc_pre_deal_sum", "tc_pre_relief_sum", "tc_pre_action_sum",
+            "tc_open_tariff_sum", "tc_open_deal_sum", "tc_deal_over_tariff_post_sum",
+            "tc_tariff_only_post_sum", "tc_relief_positive_post_sum", "tc_post_volume_spike",
+            "tc_tariff_streak_3d", "tc_deal_over_tariff_day", "tc_relief_positive_day",
+            "tc_action_positive_day",
+        ]
+        present_critical = [c for c in critical_cols if c in text_daily.columns]
+        signal = pd.Series(False, index=text_daily.index)
+        if present_critical:
+            signal |= text_daily[present_critical].sum(axis=1) > 0
+        if "tc_event_intensity_sum" in text_daily.columns:
+            signal |= text_daily["tc_event_intensity_sum"] >= signal_intensity_threshold
+        elif "post_count" in text_daily.columns:
+            signal |= text_daily["post_count"] > 0
+        return signal.to_numpy(dtype=bool)
 
     def _map_posts_to_trade_date(self, df, text_timestamp_col, text_timezone, market_timezone, market_close_time):
         df[text_timestamp_col] = pd.to_datetime(df[text_timestamp_col], errors="coerce")
