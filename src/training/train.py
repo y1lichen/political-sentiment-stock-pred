@@ -19,12 +19,14 @@ from torch.utils.data import DataLoader, TensorDataset
 from src.config import DEFAULT_TARGET, RANDOM_SEED, Paths
 from src.data.build_dataset import build_modeling_table
 from src.evaluation.metrics import classification_metrics, regression_metrics, signal_metrics
+from src.features.feature_sets import (
+    CANONICAL_FEATURE_SETS,
+    FEATURE_SET_ALIASES,
+    audit_feature_set,
+    build_feature_set,
+)
 from src.models.torch_models import EventGatedMLP, SmallMLP
-from src.utils.io import ensure_dir, read_pickle, safe_name, write_json, write_pickle
-
-
-TARGET_COLUMNS = {"target_return_1d", "target_direction_1d", "target_big_move_1d", "target_close"}
-NON_FEATURE_COLUMNS = {"date", *TARGET_COLUMNS}
+from src.utils.io import ensure_dir, safe_name, write_json, write_pickle
 
 
 def seed_everything(seed: int) -> None:
@@ -51,56 +53,18 @@ def split_by_mode(df: pd.DataFrame, mode: str) -> tuple[np.ndarray, np.ndarray, 
     return train.to_numpy(), val.to_numpy(), test.to_numpy()
 
 
+def artifact_stem(model: str, target: str, split: str, feature_set: str) -> str:
+    return f"{model}_{safe_name(target)}_{split}_{feature_set}"
+
+
 def build_sample_weights(df: pd.DataFrame, split_mode: str) -> np.ndarray:
     weights = np.ones(len(df), dtype=np.float32)
     if split_mode != "regime_aware":
         return weights
-    if "is_president" in df.columns:
-        weights *= np.where(df["is_president"].fillna(0).to_numpy() == 1, 1.5, 0.65)
-    if "trump_sum_tc_tariff" in df.columns:
-        weights *= np.where(df["trump_sum_tc_tariff"].fillna(0).to_numpy() > 0, 1.25, 1.0)
+
     if "covid_policy_period" in df.columns:
         weights *= np.where(df["covid_policy_period"].fillna(0).to_numpy() == 1, 0.75, 1.0)
     return weights
-
-
-def select_feature_columns(df: pd.DataFrame, feature_budget: int = 80) -> list[str]:
-    candidates = [
-        c
-        for c in df.columns
-        if c not in NON_FEATURE_COLUMNS and pd.api.types.is_numeric_dtype(df[c])
-        and df[c].notna().any()
-    ]
-    priority_prefixes = (
-        "trump_",
-        "mkt_",
-        "vol_",
-        "tx_night_",
-        "inst_",
-        "margin_",
-    )
-    priority_names = {
-        "is_president",
-        "first_term",
-        "post_presidency",
-        "second_term",
-        "campaign_period",
-        "covid_crash_period",
-        "covid_recovery_liquidity_period",
-        "covid_policy_period",
-        "policy_power_score",
-        "tariff_regime_intensity",
-        "high_vix_regime",
-        "market_stress_score",
-        "event_gate_default",
-    }
-    ordered = [
-        c
-        for c in candidates
-        if c in priority_names or c.startswith(priority_prefixes)
-    ]
-    ordered += [c for c in candidates if c not in ordered]
-    return ordered[:feature_budget]
 
 
 def prepare_arrays(
@@ -291,6 +255,7 @@ def save_torch_bundle(bundle: dict, path: Path, features: list[str], metadata: d
         "scaler": bundle["scaler"],
         "metadata": metadata,
     }
+    ensure_dir(path.parent)
     torch.save(state, path)
 
 
@@ -306,7 +271,14 @@ def train(args: argparse.Namespace) -> None:
         df = pd.read_csv(dataset_path, parse_dates=["date"])
 
     train_mask, val_mask, test_mask = split_by_mode(df, args.split)
-    features = select_feature_columns(df, args.feature_budget)
+    canonical_feature_set, features = build_feature_set(
+        df,
+        args.target,
+        args.feature_set,
+        feature_budget=args.feature_budget,
+        all_features=args.all_features,
+    )
+    feature_audit = audit_feature_set(features)
     arrays = prepare_arrays(df, features, train_mask, val_mask, test_mask)
     clean = arrays["clean"]
     X = arrays["X"]
@@ -318,10 +290,38 @@ def train(args: argparse.Namespace) -> None:
     if tr.sum() < 50 or va.sum() < 20:
         raise RuntimeError(f"Not enough samples. train={tr.sum()} val={va.sum()} test={te.sum()}")
 
+    stem = artifact_stem(args.model, args.target, args.split, canonical_feature_set)
+    feature_path = paths.features_dir / f"selected_features_{stem}.json"
+    write_json(
+        {
+            "target": args.target,
+            "model": args.model,
+            "split": args.split,
+            "requested_feature_set": args.feature_set,
+            "feature_set": canonical_feature_set,
+            "feature_budget": args.feature_budget,
+            "all_features": bool(args.all_features),
+            "feature_count": len(features),
+            "features": features,
+            "audit": feature_audit,
+        },
+        feature_path,
+    )
+
     if args.model in {"logistic", "elasticnet", "random_forest", "lightgbm"}:
         bundle = fit_sklearn_model(args.model, X[tr], y[tr], weights[tr])
-        model_path = paths.models_dir / f"{args.model}_{safe_name(args.target)}_{args.split}.pkl"
-        write_pickle({"model": bundle, "features": features, "model_name": args.model}, model_path)
+        model_path = paths.models_dir / f"{stem}.pkl"
+        write_pickle(
+            {
+                "model": bundle,
+                "features": features,
+                "model_name": args.model,
+                "requested_feature_set": args.feature_set,
+                "feature_set": canonical_feature_set,
+                "feature_audit": feature_audit,
+            },
+            model_path,
+        )
     else:
         bundle = fit_torch_model(
             args.model,
@@ -336,15 +336,28 @@ def train(args: argparse.Namespace) -> None:
             lr=args.lr,
             weight_decay=args.weight_decay,
         )
-        model_path = paths.models_dir / f"{args.model}_{safe_name(args.target)}_{args.split}.pt"
-        save_torch_bundle(bundle, model_path, features, vars(args))
+        model_path = paths.models_dir / f"{stem}.pt"
+        metadata = {
+            **vars(args),
+            "requested_feature_set": args.feature_set,
+            "feature_set": canonical_feature_set,
+            "feature_audit": feature_audit,
+        }
+        save_torch_bundle(bundle, model_path, features, metadata)
 
     pred_frames = []
     metrics = {
         "target": args.target,
         "model": args.model,
         "split": args.split,
+        "requested_feature_set": args.feature_set,
+        "feature_set": canonical_feature_set,
         "feature_count": len(features),
+        "feature_budget": args.feature_budget,
+        "all_features": bool(args.all_features),
+        "feature_path": str(feature_path),
+        "feature_audit": feature_audit,
+        "features": features,
         "model_path": str(model_path),
         "dataset_path": str(dataset_path),
         "split_counts": {"train": int(tr.sum()), "val": int(va.sum()), "test": int(te.sum())},
@@ -372,11 +385,11 @@ def train(args: argparse.Namespace) -> None:
             metrics[name]["log_loss"] = float("nan")
 
     pred = pd.concat(pred_frames, ignore_index=True)
-    pred_path = paths.predictions_dir / f"predictions_{args.model}_{safe_name(args.target)}_{args.split}.csv"
+    pred_path = paths.predictions_dir / f"predictions_{stem}.csv"
     ensure_dir(pred_path.parent)
     pred.to_csv(pred_path, index=False)
     metrics["prediction_path"] = str(pred_path)
-    metrics_path = paths.reports_dir / f"metrics_{args.model}_{safe_name(args.target)}_{args.split}.json"
+    metrics_path = paths.reports_dir / f"metrics_{stem}.json"
     write_json(metrics, metrics_path)
     print(f"Wrote model: {model_path}")
     print(f"Wrote predictions: {pred_path}")
@@ -408,11 +421,17 @@ def main() -> None:
     parser.add_argument("--dataset", type=Path, default=None)
     parser.add_argument("--rebuild-dataset", action="store_true")
     parser.add_argument("--feature-budget", type=int, default=80)
+    parser.add_argument("--all-features", action="store_true")
     parser.add_argument("--hidden-dim", type=int, default=32)
     parser.add_argument("--epochs", type=int, default=80)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--weight-decay", type=float, default=1e-3)
     parser.add_argument("--signal-threshold", type=float, default=0.55)
+    parser.add_argument(
+        "--feature-set",
+        default="full",
+        choices=[*CANONICAL_FEATURE_SETS, *FEATURE_SET_ALIASES],
+    )
     args = parser.parse_args()
     train(args)
 
