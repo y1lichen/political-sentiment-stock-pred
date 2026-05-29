@@ -34,19 +34,27 @@ bash scripts/train.sh 0050.TW small_mlp regime_aware
 推理最新一列：
 
 ```bash
-bash scripts/predict.sh 2330.TW outputs/models/event_gated_mlp_2330_TW_regime_aware.pt latest
+bash scripts/predict.sh 2330.TW outputs/models/event_gated_mlp_2330_TW_regime_aware_Global_plus_Trump_with_gate.pt latest
 ```
 
-訓練 Market baseline + Trump overlay：
+訓練 Market baseline + Trump overlay（單一標的）：
 
 ```bash
 bash scripts/train_overlay.sh 2330.TW lightgbm elasticnet regime_aware
+# args: TARGET MARKET_MODEL OVERLAY_MODEL SPLIT
 ```
 
 若 server 尚未安裝 LightGBM，可先用 sklearn 版本跑通：
 
 ```bash
 bash scripts/train_overlay.sh 2330.TW logistic elasticnet regime_aware
+```
+
+批次訓練全部標的（含交易成本與滑點設定）：
+
+```bash
+bash scripts/train_overlay_all_tickers.sh lightgbm elasticnet regime_aware 0.001 0.0005
+# args: MARKET_MODEL OVERLAY_MODEL SPLIT TRANSACTION_COST SLIPPAGE
 ```
 
 Overlay 管線會先用 `TW_plus_global_market` 訓練 market baseline，再用 Trump text/regime features 訓練兩個 overlay：
@@ -76,7 +84,7 @@ market_plus_trump_overlay
 - 每列資料代表一個台股交易日開盤前可用資訊。
 - 市場、法人、融資券、夜盤特徵採保守滯後，降低未來資訊洩漏。
 - `event_gate_default` 會讓模型在沒有 Trump 政策事件時傾向 `NO_TRADE`。
-- `regime_aware` split 會對總統任內、非總統期、COVID 期間使用不同樣本權重。
+- `regime_aware` 與 `all_history` 使用相同的日期切分（train: 2017–2022、val: 2023–2024、test: 2025+），差異在於 `regime_aware` 會對 COVID 政策期間（2020-02 至 2021-12）的樣本降權至 ×0.75。
 - `2025-01-20` 之後保留為最終測試期。
 
 ## CLI 參數
