@@ -6,6 +6,7 @@ from pathlib import Path
 import pandas as pd
 
 from src.config import Paths
+from src.data.build_dataset import build_modeling_table
 from src.training.train_overlay import train_overlay
 from src.utils.io import ensure_dir, safe_name, write_json
 
@@ -96,6 +97,19 @@ def position_to_signal(position) -> str:
     return "NO_TRADE"
 
 
+def has_usable_target_data(target: str, min_rows: int) -> tuple[bool, str, int]:
+    paths = Paths()
+    dataset_path = paths.datasets_dir / f"modeling_table_{safe_name(target)}.csv"
+    if dataset_path.exists():
+        df = pd.read_csv(dataset_path, usecols=["target_return_1d"])
+    else:
+        df = build_modeling_table(paths.trump_posts, paths.market_dir, target)
+    usable_rows = int(df["target_return_1d"].notna().sum())
+    if usable_rows < min_rows:
+        return False, f"NO_USABLE_TARGET_DATA usable_rows={usable_rows} min_rows={min_rows}", usable_rows
+    return True, "OK", usable_rows
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Train Market baseline + Trump overlay for many tickers.")
     parser.add_argument("--tickers", nargs="*", default=DEFAULT_TICKERS)
@@ -124,6 +138,7 @@ def main() -> None:
     parser.add_argument("--threshold-step", type=float, default=0.05)
     parser.add_argument("--min-val-signals", type=int, default=50)
     parser.add_argument("--min-overlay-train-samples", type=int, default=50)
+    parser.add_argument("--min-target-rows", type=int, default=100)
     parser.add_argument("--transaction-cost", type=float, default=0.0)
     parser.add_argument("--slippage", type=float, default=0.0)
     parser.add_argument("--fail-fast", action="store_true")
@@ -134,8 +149,16 @@ def main() -> None:
     ensure_dir(paths.predictions_dir)
 
     failures = []
+    skipped = []
     for ticker in args.tickers:
         print(f"\n=== Training overlay for {ticker} ===")
+        ok, reason, usable_rows = has_usable_target_data(ticker, args.min_target_rows)
+        if not ok:
+            payload = {"ticker": ticker, "reason": reason, "usable_rows": usable_rows}
+            skipped.append(payload)
+            failures.append({"ticker": ticker, "error": reason})
+            print(f"SKIPPED {ticker}: {reason}")
+            continue
         overlay_args = argparse.Namespace(
             target=ticker,
             split=args.split,
@@ -172,8 +195,20 @@ def main() -> None:
 
     summary_rows: list[dict] = []
     latest_rows: list[dict] = []
+    skipped_by_ticker = {item["ticker"]: item for item in skipped}
     for ticker in args.tickers:
         rows, latest = collect_one(paths, ticker, args.split, args.market_model, args.overlay_model)
+        if ticker in skipped_by_ticker:
+            item = skipped_by_ticker[ticker]
+            latest.update(
+                {
+                    "status": "SKIPPED",
+                    "skip_reason": item["reason"],
+                    "usable_rows": item["usable_rows"],
+                }
+            )
+        else:
+            latest.setdefault("status", "OK")
         summary_rows.extend(rows)
         latest_rows.append(latest)
 
@@ -195,6 +230,7 @@ def main() -> None:
             "summary_path": str(summary_out),
             "latest_path": str(latest_out),
             "failures": failures,
+            "skipped": skipped,
         },
         failures_out,
     )
