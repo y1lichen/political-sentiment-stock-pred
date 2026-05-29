@@ -1,19 +1,27 @@
-# Deep Trump-Code
+# Deep Trump-Code Event Sequence
 
-本分支把原本每日分類器改成「深度學習版 trump_code」：
+本分支把專案主流程改成「深度學習版 trump_code」：
 
-1. 先用 Trump-code 式事件規則產生候選交易。
-2. 每個候選交易由 `target × event rule × holding horizon` 定義。
-3. 深度模型讀取市場序列、Trump 事件序列、規則 embedding、標的 embedding 與持有期 embedding。
-4. 模型預測候選交易方向：`0 = short/down`，`1 = long/up`。
-5. 每個 walk-forward split 在 validation 上選信心門檻與 survivor rules。
-6. 只在 test 中對高信心、long-only、survivor candidates 出手並統計 hit rate / return。
+1. 不再把任務寫成單篇貼文情緒直接預測股價。
+2. 也不把 trump_code 的規則硬寫成 test-time brute-force rule。
+3. 先把 README 中的事件發現轉成每日序列特徵，例如 RELIEF、TARIFF、night tariff、silence day、China burst、pre-market density、Truth Social lead proxy。
+4. 模型同時讀取 `market sequence branch` 與 `Trump event sequence branch`。
+5. 兩個 branch 都使用 LSTM + attention pooling，再融合標的 embedding，輸出隔日二元方向：`0 = down`、`1 = up`。
+6. Walk-forward split 只用 train fit scaler、validation 做 early stopping、test 做最終評估。
 
-這比每日三分類更接近 `sstklen/trump-code` 的概念，但最後的方向與信心分數由 neural scorer 學習。
+主程式是：
+
+```text
+train.py
+src/trump_event_sequence.py
+src/data_loader.py
+```
+
+舊的候選規則 neural scorer 仍保留在 `src/deep_trump_code.py`，但已不是 `train.py` 的主入口。
 
 ## 執行
 
-如果同學提供的是 `data/trump_nlp/trump_posts_features_2017_2026.csv`，且你只修改了 keyword / event 規則，不需要原始爬蟲檔。先用既有 `Content` 重新標記：
+若你修改了 NLP keywords / event 規則，可以用既有 `Content` 重新標記，不需要原始爬蟲檔：
 
 ```bash
 source .venv/bin/activate
@@ -24,54 +32,43 @@ python data/trump_nlp/extract_nlp_features.py \
   --force
 ```
 
-這會保留同學已算好的 `vader_compound`、`emotion_label`、`emotion_score`、`weighted_vader`，只重新產生新版 keywords、Trump-code events、time/signature/event intensity 等欄位。
-
 訓練程式會優先讀：
 
 ```text
 data/trump_nlp/trump_posts_features_2017_2026_relabel.csv
 ```
 
-若該檔不存在，才退回讀原始 `data/trump_nlp/trump_posts_features_2017_2026.csv`。
+若該檔不存在，會退回：
+
+```text
+data/trump_nlp/trump_posts_features_2017_2026.csv
+```
+
+開始訓練：
 
 ```bash
 source .venv/bin/activate
 python train.py
 ```
 
+## 輸出
+
 主要輸出在 `output/`：
 
 ```text
-deep_trump_code_predictions.csv       每個 test candidate 的模型輸出與是否 selected
-deep_trump_code_summary.csv           每個 split 的候選數、出手數、hit rate、平均策略報酬
-deep_trump_code_overall.csv           全部 split 的總結
-deep_trump_code_target_summary.csv    各標的 selected trades 表現
-deep_trump_code_rule_survivors.csv    每個 split 通過 validation 的 survivor rules
-deep_trump_code_rules.csv             rule_id 對照表
+event_sequence_predictions.csv        每個 test sample 的預測、機率、隔日報酬
+event_sequence_summary.csv            每個 split/model 的 accuracy、Macro F1、高信心 long-only 統計
+event_sequence_overall.csv            全部 split 的整體比較
+event_sequence_target_summary.csv     各標的表現
+event_sequence_market_features.csv    market branch 特徵列表
+event_sequence_text_features.csv      Trump event branch 特徵列表
 ```
 
-目前 selection policy 較保守：
+`event_sequence_summary.csv` 會同時比較：
 
 ```text
-沒有 survivor rules 的 split 不出手
-只允許 pred=1 的 long candidates
-每個 split 最多選 max_selected_per_split 筆最高 confidence candidates
-survivor rule 需要 validation hit rate >= 0.58 且平均策略報酬 > 0
-validation 整體 regime 需要 hit rate >= 0.52 且平均策略報酬 > 0
+market_only      只使用市場序列
+event_sequence   市場序列 + Trump event 序列
 ```
 
-## 方法差異
-
-舊版流程是：
-
-```text
-每個高訊號交易日 -> 預測下一期上/下
-```
-
-新版流程是：
-
-```text
-每個 target × event rule × horizon -> neural scorer 評分 -> validation 選 threshold/rule -> test 只出手 survivor candidates
-```
-
-這讓模型具備 trump_code 的「選擇性出手」本質，同時保留 deep learning 作為核心決策器。
+如果 `event_sequence` 長期沒有明顯優於 `market_only`，代表 Trump event features 對台股隔日方向沒有提供穩定的 out-of-sample 增量訊號。

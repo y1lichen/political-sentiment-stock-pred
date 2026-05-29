@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from src.deep_trump_code import Config, run_deep_trump_code
+from src.trump_event_sequence import Config, run_event_sequence
 
 
 if __name__ == "__main__":
@@ -9,18 +9,12 @@ if __name__ == "__main__":
 
     config = Config(
         window_size=20,
-        horizons=(1, 2, 3),
-        max_splits=8,
-        epochs=12,
+        max_splits=7,
+        epochs=18,
         batch_size=512,
-        hidden_dim=64,
-        dropout=0.30,
-        min_val_rule_trades=8,
-        min_val_rule_hit_rate=0.58,
-        min_val_rule_avg_return=0.0,
-        min_val_selected_hit_rate=0.52,
-        min_val_selected_avg_return=0.0,
-        max_selected_per_split=500,
+        hidden_dim=96,
+        dropout=0.25,
+        high_conf_quantile=0.85,
     )
 
-    run_deep_trump_code(base_dir=base_dir, output_dir=output_dir, config=config)
+    run_event_sequence(base_dir=base_dir, output_dir=output_dir, config=config)

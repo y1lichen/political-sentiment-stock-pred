@@ -57,6 +57,23 @@ def prepare_text_dataframe(text_path):
     ts_et = df["Timestamp"].dt.tz_convert("America/New_York")
     et_hour = ts_et.dt.hour
     et_minute = ts_et.dt.minute
+
+    if "Platform" in df.columns:
+        platform = df["Platform"].fillna("").astype(str).str.lower()
+        df["platform_truth_social"] = platform.str.contains("truth", regex=False).astype(float)
+        df["platform_twitter_legacy"] = (
+            platform.str.contains("twitter", regex=False)
+            | platform.str.contains("tweet", regex=False)
+        ).astype(float)
+        df["platform_x"] = (
+            platform.str.fullmatch("x").fillna(False)
+            | platform.str.contains("x.com", regex=False)
+        ).astype(float)
+    else:
+        df["platform_truth_social"] = 0.0
+        df["platform_twitter_legacy"] = 0.0
+        df["platform_x"] = 0.0
+
     if "is_pre_market" not in df.columns:
         df["is_pre_market"] = ((et_hour < 9) | ((et_hour == 9) & (et_minute < 30))).astype(float)
     if "is_market_hours" not in df.columns:
@@ -296,7 +313,7 @@ class CustomDataset(Dataset):
         if text_feature_cols is not None:
             numeric_cols = [c for c in text_feature_cols if c in numeric_cols]
 
-        binary_prefixes = ("kw_", "tc_", "sig_", "is_", "emo_")
+        binary_prefixes = ("kw_", "tc_", "sig_", "is_", "emo_", "platform_")
         binary_cols = [
             c for c in numeric_cols
             if c.startswith(binary_prefixes)
@@ -358,6 +375,65 @@ class CustomDataset(Dataset):
             derived["tc_relief_positive_day"] = ((daily[relief_col] > 0) & (daily[positive_col] > 0)).astype(float)
         if action_col in daily.columns and positive_col in daily.columns:
             derived["tc_action_positive_day"] = ((daily[action_col] > 0) & (daily[positive_col] > 0)).astype(float)
+
+        def col(name: str) -> pd.Series:
+            if name in daily.columns:
+                return daily[name].fillna(0.0)
+            if name in derived.columns:
+                return derived[name].fillna(0.0)
+            return pd.Series(0.0, index=daily.index)
+
+        def zscore(series: pd.Series, window: int = 20) -> pd.Series:
+            mean = series.shift(1).rolling(window, min_periods=5).mean()
+            std = series.shift(1).rolling(window, min_periods=5).std().replace(0, 1)
+            return ((series - mean) / std).replace([np.inf, -np.inf], 0.0).fillna(0.0)
+
+        event_intensity = col("tc_event_intensity_sum")
+        tariff_posts = col("tc_tariff_sum")
+        deal_posts = col("tc_deal_sum")
+        relief_posts = col("tc_relief_sum")
+        china_posts = col("kw_china_sum")
+        night_tariff = col("tc_night_tariff_sum")
+        pre_market_posts = col("is_pre_market_sum")
+        emotional_intensity = col("emotion_score_max").clip(lower=0.0)
+        anger_impact = col("anger_impact_weighted")
+        if anger_impact.abs().sum() == 0:
+            anger_impact = col("anger_impact_mean")
+
+        silence = col("tc_silence_day").astype(bool)
+        derived["silence_streak"] = silence.groupby((silence != silence.shift()).cumsum()).cumcount().add(1).where(silence, 0).astype(float)
+        derived["pre_market_post_count"] = pre_market_posts
+        derived["tariff_night_score"] = night_tariff * (1.0 + emotional_intensity)
+        derived["pure_tariff_score"] = col("tc_tariff_only_post_sum") + col("tc_tariff_only_day")
+        derived["relief_score"] = relief_posts + col("tc_pre_relief_sum") + col("tc_relief_positive_post_sum")
+        derived["relief_over_tariff_score"] = derived["relief_score"] - tariff_posts
+        derived["event_score_z20"] = zscore(event_intensity)
+        derived["event_intensity_z20"] = derived["event_score_z20"]
+        derived["tariff_score_z20"] = zscore(tariff_posts)
+        derived["china_burst_5d"] = (
+            china_posts.rolling(5, min_periods=1).sum()
+            / china_posts.shift(1).rolling(20, min_periods=5).mean().replace(0, np.nan)
+        ).replace([np.inf, -np.inf], 0.0).fillna(0.0)
+        derived["tariff_burst_5d"] = (
+            tariff_posts.rolling(5, min_periods=1).sum()
+            / tariff_posts.shift(1).rolling(20, min_periods=5).mean().replace(0, np.nan)
+        ).replace([np.inf, -np.inf], 0.0).fillna(0.0)
+        derived["anger_impact_ewm"] = anger_impact.ewm(halflife=3, min_periods=1).mean().fillna(0.0)
+        derived["deal_minus_tariff_ewm"] = (deal_posts - tariff_posts).ewm(halflife=3, min_periods=1).mean().fillna(0.0)
+        derived["relief_minus_tariff_ewm"] = (relief_posts - tariff_posts).ewm(halflife=3, min_periods=1).mean().fillna(0.0)
+        derived["truth_social_post_count"] = col("platform_truth_social_sum")
+        derived["twitter_legacy_post_count"] = col("platform_twitter_legacy_sum")
+        derived["x_post_count"] = col("platform_x_sum")
+        derived["truth_share"] = (
+            derived["truth_social_post_count"] / post_count.replace(0, np.nan)
+        ).replace([np.inf, -np.inf], 0.0).fillna(0.0)
+        truth_prior = derived["truth_social_post_count"].shift(1).rolling(20, min_periods=5).mean()
+        derived["truth_social_spike"] = (
+            (derived["truth_social_post_count"] > truth_prior * 2.0) & (truth_prior > 0)
+        ).astype(float)
+        derived["truth_social_lead_proxy"] = (
+            (derived["truth_social_post_count"] > 0) & (derived["twitter_legacy_post_count"] == 0)
+        ).astype(float)
 
         daily = pd.concat([daily, derived], axis=1)
         daily = daily.select_dtypes(include=[np.number, "bool"])
