@@ -10,7 +10,7 @@ import torch
 from src.config import DEFAULT_TARGET, Paths
 from src.data.build_dataset import build_modeling_table
 from src.models.torch_models import EventGatedMLP, SmallMLP
-from src.training.train import predict_model
+from src.training.common import predict_model
 from src.utils.io import ensure_dir, read_pickle, safe_name, write_json
 
 

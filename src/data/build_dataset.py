@@ -92,25 +92,30 @@ TARGET_TICKERS = ["2330.TW", "2454.TW", "0050.TW"]
 
 def add_regime_features(df: pd.DataFrame) -> pd.DataFrame:
     d = pd.to_datetime(df["date"])
-    df["is_president"] = (
-        ((d >= "2017-01-20") & (d <= "2021-01-20"))
-        | (d >= "2025-01-20")
-    ).astype(int)
-    df["first_term"] = ((d >= "2017-01-20") & (d <= "2021-01-20")).astype(int)
-    df["post_presidency"] = ((d >= "2021-01-21") & (d <= "2025-01-19")).astype(int)
-    df["second_term"] = (d >= "2025-01-20").astype(int)
-    df["campaign_period"] = (
+    first_term = ((d >= "2017-01-20") & (d <= "2021-01-20")).astype(int)
+    second_term = (d >= "2025-01-20").astype(int)
+    is_president = (first_term.eq(1) | second_term.eq(1)).astype(int)
+    campaign_period = (
         ((d >= "2020-06-01") & (d <= "2020-11-30"))
         | ((d >= "2024-06-01") & (d <= "2024-11-30"))
     ).astype(int)
-    df["covid_crash_period"] = ((d >= "2020-02-01") & (d <= "2020-04-30")).astype(int)
-    df["covid_recovery_liquidity_period"] = (
-        (d >= "2020-05-01") & (d <= "2021-12-31")
-    ).astype(int)
-    df["covid_policy_period"] = ((d >= "2020-02-01") & (d <= "2021-12-31")).astype(int)
-    df["policy_power_score"] = df["is_president"].astype(float)
-    df.loc[df["campaign_period"].eq(1) & df["is_president"].eq(0), "policy_power_score"] = 0.4
-    return df
+    policy_power_score = is_president.astype(float)
+    policy_power_score = policy_power_score.mask(campaign_period.eq(1) & is_president.eq(0), 0.4)
+    regime = pd.DataFrame(
+        {
+            "is_president": is_president,
+            "first_term": first_term,
+            "post_presidency": ((d >= "2021-01-21") & (d <= "2025-01-19")).astype(int),
+            "second_term": second_term,
+            "campaign_period": campaign_period,
+            "covid_crash_period": ((d >= "2020-02-01") & (d <= "2020-04-30")).astype(int),
+            "covid_recovery_liquidity_period": ((d >= "2020-05-01") & (d <= "2021-12-31")).astype(int),
+            "covid_policy_period": ((d >= "2020-02-01") & (d <= "2021-12-31")).astype(int),
+            "policy_power_score": policy_power_score,
+        },
+        index=df.index,
+    )
+    return pd.concat([df, regime], axis=1).copy()
 
 
 def load_trading_calendar(market_dir: Path) -> list[pd.Timestamp]:
@@ -290,12 +295,15 @@ def build_modeling_table(trump_path: Path, market_dir: Path, target: str) -> pd.
     df = add_margin_features(market_dir, target, df)
     df = add_tx_features(market_dir, df)
 
-    if "trump_sum_tc_tariff" in df.columns:
-        df["tariff_regime_intensity"] = (
-            df["trump_sum_tc_tariff"].rolling(20, min_periods=1).sum().shift(1).fillna(0)
-        )
-    else:
-        df["tariff_regime_intensity"] = 0.0
+    tariff_regime_intensity = (
+        df["trump_sum_tc_tariff"].rolling(20, min_periods=1).sum().shift(1).fillna(0)
+        if "trump_sum_tc_tariff" in df.columns
+        else pd.Series(0.0, index=df.index)
+    )
+    df = pd.concat(
+        [df, pd.DataFrame({"tariff_regime_intensity": tariff_regime_intensity}, index=df.index)],
+        axis=1,
+    ).copy()
 
     df = df.sort_values("date").replace([np.inf, -np.inf], np.nan)
     return df
@@ -330,4 +338,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

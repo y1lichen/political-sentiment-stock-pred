@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-from pathlib import Path
 
 import pandas as pd
 
@@ -197,17 +196,17 @@ def main() -> None:
     latest_rows: list[dict] = []
     skipped_by_ticker = {item["ticker"]: item for item in skipped}
     for ticker in args.tickers:
-        rows, latest = collect_one(paths, ticker, args.split, args.market_model, args.overlay_model)
         if ticker in skipped_by_ticker:
             item = skipped_by_ticker[ticker]
-            latest.update(
-                {
-                    "status": "SKIPPED",
-                    "skip_reason": item["reason"],
-                    "usable_rows": item["usable_rows"],
-                }
-            )
+            rows = []
+            latest = {
+                "ticker": ticker,
+                "status": "SKIPPED",
+                "skip_reason": item["reason"],
+                "usable_rows": item["usable_rows"],
+            }
         else:
+            rows, latest = collect_one(paths, ticker, args.split, args.market_model, args.overlay_model)
             latest.setdefault("status", "OK")
         summary_rows.extend(rows)
         latest_rows.append(latest)

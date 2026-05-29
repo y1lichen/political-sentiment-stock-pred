@@ -15,10 +15,9 @@ from src.features.feature_sets import (
     TRUMP_REGIME_COLUMNS,
     build_feature_set,
 )
-from src.training.train import (
+from src.training.common import (
     build_sample_weights,
     fit_sklearn_model,
-    predict_model,
     split_by_mode,
 )
 from src.utils.io import ensure_dir, safe_name, write_json, write_pickle
