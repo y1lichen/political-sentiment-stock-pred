@@ -47,8 +47,12 @@ class Config:
     lr: float = 1e-3
     weight_decay: float = 1e-4
     min_val_rule_trades: int = 8
-    min_val_rule_hit_rate: float = 0.52
-    threshold_grid: tuple[float, ...] = (0.50, 0.52, 0.54, 0.56, 0.58, 0.60, 0.62, 0.64, 0.66)
+    min_val_rule_hit_rate: float = 0.58
+    min_val_rule_avg_return: float = 0.0
+    min_val_selected_hit_rate: float = 0.52
+    min_val_selected_avg_return: float = 0.0
+    max_selected_per_split: int = 500
+    threshold_grid: tuple[float, ...] = (0.56, 0.58, 0.60, 0.62, 0.64, 0.66, 0.68, 0.70, 0.72)
 
 
 @dataclass
@@ -504,17 +508,25 @@ def predict_candidates(model: nn.Module, loader: DataLoader, device: torch.devic
     return pd.DataFrame(rows)
 
 
-def choose_threshold(val_pred: pd.DataFrame, grid: Iterable[float]) -> float:
-    best_threshold = 0.50
+def _long_only_candidates(pred: pd.DataFrame, threshold: float) -> pd.DataFrame:
+    selected = pred[(pred["pred"] == 1) & (pred["confidence"] >= threshold)].copy()
+    selected["strategy_return"] = selected["future_return"]
+    return selected
+
+
+def choose_threshold(val_pred: pd.DataFrame, grid: Iterable[float], config: Config) -> float | None:
+    best_threshold = None
     best_score = -1e9
     for threshold in grid:
-        selected = val_pred[val_pred["confidence"] >= threshold].copy()
+        selected = _long_only_candidates(val_pred, threshold)
         if len(selected) < 25:
             continue
-        direction = np.where(selected["pred"].to_numpy() == 1, 1.0, -1.0)
-        strategy_return = direction * selected["future_return"].to_numpy()
+        selected = selected.sort_values("confidence", ascending=False).head(config.max_selected_per_split)
+        strategy_return = selected["strategy_return"].to_numpy()
         hit_rate = (strategy_return > 0).mean()
         avg_return = strategy_return.mean()
+        if hit_rate < config.min_val_selected_hit_rate or avg_return <= config.min_val_selected_avg_return:
+            continue
         score = avg_return * math.sqrt(len(selected)) + 0.0025 * (hit_rate - 0.5)
         if score > best_score:
             best_score = score
@@ -524,16 +536,20 @@ def choose_threshold(val_pred: pd.DataFrame, grid: Iterable[float]) -> float:
 
 def survivor_rules(val_pred: pd.DataFrame, threshold: float, config: Config) -> pd.DataFrame:
     columns = ["rule_name", "n_val_trades", "val_hit_rate", "val_avg_strategy_return"]
-    selected = val_pred[val_pred["confidence"] >= threshold].copy()
+    selected = _long_only_candidates(val_pred, threshold)
     if selected.empty:
         return pd.DataFrame(columns=columns)
-    selected["strategy_return"] = np.where(selected["pred"] == 1, selected["future_return"], -selected["future_return"])
     rows = []
     for rule_name, group in selected.groupby("rule_name"):
+        group = group.sort_values("confidence", ascending=False).head(config.max_selected_per_split)
         n = len(group)
         hit_rate = float((group["strategy_return"] > 0).mean())
         avg_return = float(group["strategy_return"].mean())
-        if n >= config.min_val_rule_trades and hit_rate >= config.min_val_rule_hit_rate:
+        if (
+            n >= config.min_val_rule_trades
+            and hit_rate >= config.min_val_rule_hit_rate
+            and avg_return > config.min_val_rule_avg_return
+        ):
             rows.append(
                 {
                     "rule_name": rule_name,
@@ -547,14 +563,21 @@ def survivor_rules(val_pred: pd.DataFrame, threshold: float, config: Config) -> 
     return pd.DataFrame(rows, columns=columns).sort_values(["val_hit_rate", "val_avg_strategy_return"], ascending=False)
 
 
-def score_predictions(pred: pd.DataFrame, threshold: float, allowed_rules: set[str] | None = None) -> tuple[pd.DataFrame, dict[str, float]]:
+def score_predictions(pred: pd.DataFrame, threshold: float | None, allowed_rules: set[str], config: Config) -> tuple[pd.DataFrame, dict[str, float]]:
     out = pred.copy()
-    allowed = np.ones(len(out), dtype=bool)
-    if allowed_rules:
-        allowed = out["rule_name"].isin(allowed_rules).to_numpy()
-    out["selected"] = (out["confidence"] >= threshold) & allowed
-    out["direction"] = np.where(out["pred"] == 1, 1, -1)
-    out["strategy_return"] = out["direction"] * out["future_return"]
+    allowed = out["rule_name"].isin(allowed_rules).to_numpy()
+    out["selected"] = False
+    if threshold is not None and allowed_rules:
+        long_mask = (out["pred"] == 1) & (out["confidence"] >= threshold) & allowed
+        selected_idx = (
+            out[long_mask]
+            .sort_values("confidence", ascending=False)
+            .head(config.max_selected_per_split)
+            .index
+        )
+        out.loc[selected_idx, "selected"] = True
+    out["direction"] = np.where(out["selected"], 1, 0)
+    out["strategy_return"] = np.where(out["selected"], out["future_return"], 0.0)
     selected = out[out["selected"]].copy()
     if selected.empty:
         metrics = {
@@ -623,23 +646,25 @@ def run_deep_trump_code(base_dir: Path, output_dir: Path, config: Config | None 
         )
 
         val_pred = predict_candidates(model, DataLoader(val_ds, batch_size=config.batch_size), device)
-        threshold = choose_threshold(val_pred, config.threshold_grid)
-        survivors = survivor_rules(val_pred, threshold, config)
-        allowed_rules = set(survivors["rule_name"]) if not survivors.empty else None
-        if survivors.empty:
-            print(f"split={split_id}: no survivor rules; falling back to threshold-only selection")
+        threshold = choose_threshold(val_pred, config.threshold_grid, config)
+        survivors = survivor_rules(val_pred, threshold, config) if threshold is not None else pd.DataFrame()
+        allowed_rules = set(survivors["rule_name"]) if not survivors.empty else set()
+        if threshold is None:
+            print(f"split={split_id}: validation regime filter failed; test will not trade")
+        elif survivors.empty:
+            print(f"split={split_id}: no survivor rules; test will not trade")
 
         test_pred = predict_candidates(model, DataLoader(test_ds, batch_size=config.batch_size), device)
-        test_scored, metrics = score_predictions(test_pred, threshold, allowed_rules)
+        test_scored, metrics = score_predictions(test_pred, threshold, allowed_rules, config)
         test_scored.insert(0, "split", split_id)
-        test_scored["threshold"] = threshold
+        test_scored["threshold"] = np.nan if threshold is None else threshold
         all_predictions.append(test_scored)
 
         metrics.update(
             {
                 "split": split_id,
-                "threshold": threshold,
-                "n_survivor_rules": 0 if allowed_rules is None else len(allowed_rules),
+                "threshold": np.nan if threshold is None else threshold,
+                "n_survivor_rules": len(allowed_rules),
                 "train_start": records[int(train_idx[0])].date.strftime("%Y-%m-%d"),
                 "train_end": records[int(train_idx[-1])].date.strftime("%Y-%m-%d"),
                 "val_start": records[int(val_idx[0])].date.strftime("%Y-%m-%d"),
