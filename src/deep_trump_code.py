@@ -166,7 +166,6 @@ def _generic_market_df(market_df: pd.DataFrame, target: str) -> pd.DataFrame:
 
 def load_bundles(base_dir: Path, targets: Iterable[str], config: Config) -> tuple[list[TargetBundle], list[str], list[str]]:
     text_candidates = [
-        base_dir / "data/trump_nlp/trump_posts_features_2017_2026_relabel.csv",
         base_dir / "data/trump_nlp/trump_posts_features_2017_2026.csv",
         base_dir / "data/text/trump_posts_features_2017_2026.csv",
     ]
