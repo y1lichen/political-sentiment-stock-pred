@@ -37,12 +37,39 @@ bash scripts/train.sh 0050.TW small_mlp regime_aware
 bash scripts/predict.sh 2330.TW outputs/models/event_gated_mlp_2330_TW_regime_aware.pt latest
 ```
 
+訓練 Market baseline + Trump overlay：
+
+```bash
+bash scripts/train_overlay.sh 2330.TW lightgbm elasticnet regime_aware
+```
+
+若 server 尚未安裝 LightGBM，可先用 sklearn 版本跑通：
+
+```bash
+bash scripts/train_overlay.sh 2330.TW logistic elasticnet regime_aware
+```
+
+Overlay 管線會先用 `TW_plus_global_market` 訓練 market baseline，再用 Trump text/regime features 訓練兩個 overlay：
+
+- `profit_model`：在 Trump event days 判斷 market signal 是否該被 veto。
+- `direction_model`：在 Trump event days 且 market baseline 沒出手時，判斷是否 override 成 LONG / SHORT。
+
+主要比較輸出是：
+
+```text
+market_only
+market_plus_trump_overlay
+```
+
+如果 overlay 的 test `return_after_costs`、`compound_nav`、`avg_signal_return` 或 `cumulative_return` 高於 market baseline，才代表 Trump overlay 在目前設定下真的改善收益。
+
 輸出位置：
 
 - 資料集：`outputs/datasets/`
 - 模型：`outputs/models/`
 - 預測：`outputs/predictions/`
 - 指標：`outputs/reports/`
+- Overlay 報告：`outputs/reports/report_overlay_*.md`
 
 ## 重要設計
 
@@ -58,4 +85,3 @@ bash scripts/predict.sh 2330.TW outputs/models/event_gated_mlp_2330_TW_regime_aw
 python -m src.training.train --help
 python -m src.inference.predict --help
 ```
-
