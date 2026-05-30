@@ -45,8 +45,7 @@ REGIME_LABELS = {
 
 DIRECTION_LABELS = {
     0: "down",
-    1: "flat",
-    2: "up",
+    1: "up",
 }
 
 
@@ -59,6 +58,12 @@ def parse_args():
     )
     parser.add_argument("--target", default="2330.TW", help="Target ticker in global_prices.csv.")
     parser.add_argument("--hold", type=int, default=1, help="Prediction horizon in trading days.")
+    parser.add_argument(
+        "--binary-threshold",
+        type=float,
+        default=0.0,
+        help="Future return threshold for binary label. > threshold is up, otherwise down.",
+    )
     parser.add_argument("--window", type=int, default=20, help="LSTM lookback window.")
     parser.add_argument("--min-n", type=int, default=20, help="Minimum samples for a brute-force event combo.")
     parser.add_argument("--min-abs-mean-ret", type=float, default=0.001, help="Minimum absolute mean return.")
@@ -316,7 +321,7 @@ def add_event_regime_interactions(df, selected_events):
     return out
 
 
-def build_model_frame(price_df, event_df, selected_events, combo_df, target, hold):
+def build_model_frame(price_df, event_df, selected_events, combo_df, target, hold, binary_threshold):
     market = make_market_features(price_df, target)
     events = combo_df[selected_events].copy()
     counts = event_df[[c for c in COUNT_EVENT_COLS if c in event_df.columns]].copy()
@@ -329,12 +334,8 @@ def build_model_frame(price_df, event_df, selected_events, combo_df, target, hol
 
     price = price_df[target].dropna()
     future_ret = price.shift(-hold) / price - 1
-    threshold = price.pct_change().rolling(60, min_periods=20).std().shift(1) * 0.5
-    threshold = threshold.reindex(frame.index).ffill().bfill()
     frame["future_ret"] = future_ret
-    frame["direction_label"] = 1
-    frame.loc[frame["future_ret"] > threshold, "direction_label"] = 2
-    frame.loc[frame["future_ret"] < -threshold, "direction_label"] = 0
+    frame["direction_label"] = (frame["future_ret"] > binary_threshold).astype(int)
 
     frame = frame.replace([np.inf, -np.inf], np.nan).sort_index()
     frame = frame.dropna(subset=["future_ret", "direction_label", "regime_label"])
@@ -577,13 +578,16 @@ def predictions_frame(metrics):
             "future_ret": metrics["returns"],
         }
     )
-    probs = pd.DataFrame(metrics["probs"], columns=[f"prob_{DIRECTION_LABELS[i]}" for i in range(3)])
+    probs = pd.DataFrame(
+        metrics["probs"],
+        columns=[f"prob_{DIRECTION_LABELS[i]}" for i in range(len(DIRECTION_LABELS))],
+    )
     out = pd.concat([out, probs], axis=1)
     out["actual_label_name"] = out["actual_label"].map(DIRECTION_LABELS)
     out["pred_label_name"] = out["pred_label"].map(DIRECTION_LABELS)
     out["actual_regime_name"] = out["actual_regime"].map(REGIME_LABELS)
     out["pred_regime_name"] = out["pred_regime"].map(REGIME_LABELS)
-    signal = out["pred_label"].map({0: -1, 1: 0, 2: 1}).astype(float)
+    signal = out["pred_label"].map({0: -1, 1: 1}).astype(float)
     out["strategy_ret_no_cost"] = signal * out["future_ret"]
     return out
 
@@ -653,6 +657,7 @@ def main():
         combo_df=combo_df,
         target=args.target,
         hold=args.hold,
+        binary_threshold=args.binary_threshold,
     )
 
     all_event_cols = selected_events + [
@@ -710,12 +715,12 @@ def main():
     report = classification_report(
         y_true,
         y_pred,
-        labels=[0, 1, 2],
-        target_names=[DIRECTION_LABELS[i] for i in range(3)],
+        labels=list(DIRECTION_LABELS.keys()),
+        target_names=[DIRECTION_LABELS[i] for i in DIRECTION_LABELS],
         zero_division=0,
         output_dict=True,
     )
-    cm = confusion_matrix(y_true, y_pred, labels=[0, 1, 2])
+    cm = confusion_matrix(y_true, y_pred, labels=list(DIRECTION_LABELS.keys()))
 
     brute_df.to_csv(output_dir / "brute_force_all_events.csv", index=False)
     selected_df.to_csv(output_dir / "brute_force_selected_events.csv", index=False)
@@ -741,6 +746,7 @@ def main():
     summary = {
         "target": args.target,
         "hold": args.hold,
+        "binary_threshold": args.binary_threshold,
         "window": args.window,
         "device": device,
         "rows": {
@@ -762,7 +768,7 @@ def main():
             "strategy_total_return_no_cost": float((1 + pred_df["strategy_ret_no_cost"]).prod() - 1),
         },
         "classification_report": report,
-        "confusion_matrix_labels": [DIRECTION_LABELS[i] for i in range(3)],
+        "confusion_matrix_labels": [DIRECTION_LABELS[i] for i in DIRECTION_LABELS],
         "confusion_matrix": cm.tolist(),
     }
     (output_dir / "summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
@@ -777,7 +783,7 @@ def main():
         f"mean={summary['test']['strategy_mean_return_no_cost']:.6f}, "
         f"total={summary['test']['strategy_total_return_no_cost']:.4f}"
     )
-    print("Confusion matrix rows=true, cols=pred [down, flat, up]:")
+    print("Confusion matrix rows=true, cols=pred [down, up]:")
     print(cm)
     print(f"Saved outputs to: {output_dir}")
     print("==============================")

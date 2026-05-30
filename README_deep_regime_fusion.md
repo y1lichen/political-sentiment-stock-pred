@@ -55,6 +55,7 @@ Recommended full run:
 python event_combo.py \
   --target 2330.TW \
   --hold 1 \
+  --binary-threshold 0.0 \
   --window 20 \
   --epochs 40 \
   --batch-size 64 \
@@ -90,6 +91,8 @@ The output directory contains:
 
 ## Notes
 
-This is a classification model for next-period direction: `down`, `flat`, or `up`.
+This is a binary classification model for next-period direction: `down` or `up`.
+By default, next-period return `> 0` is labeled `up`; otherwise it is labeled `down`.
+You can change this cutoff with `--binary-threshold`.
 It uses a time split and rolling/lagged features where applicable to reduce look-ahead leakage.
 Reported strategy returns are diagnostic only and do not include fees, slippage, borrow costs, or position sizing.
