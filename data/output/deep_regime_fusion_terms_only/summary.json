@@ -1,0 +1,99 @@
+{
+  "target": "2330.TW",
+  "hold": 1,
+  "presidential_terms_only": true,
+  "presidential_terms": [
+    [
+      "2017-01-20",
+      "2021-01-19"
+    ],
+    [
+      "2025-01-20",
+      "2100-12-31"
+    ]
+  ],
+  "binary_threshold": 0.0,
+  "window": 20,
+  "trade_mode": "long_cash",
+  "trade_edge_threshold": 0.1,
+  "selected_trade_edge_threshold": 0.05,
+  "auto_trade_threshold": true,
+  "min_val_trade_coverage": 0.05,
+  "use_class_weights": true,
+  "device": "cuda",
+  "rows": {
+    "usable": 1387,
+    "train": 970,
+    "val": 228,
+    "test": 229
+  },
+  "term_segment_counts": {
+    "1": 1045,
+    "2": 342
+  },
+  "features": {
+    "market": 49,
+    "event_regime": 172,
+    "selected_events": 69
+  },
+  "validation_strategy": {
+    "trade_coverage": 0.2127659574468085,
+    "neutral_count": 148,
+    "long_count": 40,
+    "short_count": 0,
+    "strategy_mean_return_no_cost": 0.0010719764135540166,
+    "strategy_total_return_no_cost": 0.20843188635440169
+  },
+  "test": {
+    "loss": 0.867565429096587,
+    "accuracy": 0.41148325358851673,
+    "regime_accuracy": 0.7751196172248804,
+    "trade_coverage": 0.3588516746411483,
+    "neutral_count": 134,
+    "long_count": 75,
+    "short_count": 0,
+    "strategy_mean_return_no_cost": 0.0003889433373407456,
+    "strategy_total_return_no_cost": 0.07000212502954772
+  },
+  "classification_report": {
+    "down": {
+      "precision": 0.43956043956043955,
+      "recall": 0.35714285714285715,
+      "f1-score": 0.39408866995073893,
+      "support": 112.0
+    },
+    "up": {
+      "precision": 0.3898305084745763,
+      "recall": 0.4742268041237113,
+      "f1-score": 0.42790697674418604,
+      "support": 97.0
+    },
+    "accuracy": 0.41148325358851673,
+    "macro avg": {
+      "precision": 0.41469547401750795,
+      "recall": 0.4156848306332842,
+      "f1-score": 0.4109978233474625,
+      "support": 209.0
+    },
+    "weighted avg": {
+      "precision": 0.41648004092250307,
+      "recall": 0.41148325358851673,
+      "f1-score": 0.40978424774482686,
+      "support": 209.0
+    }
+  },
+  "confusion_matrix_labels": [
+    "down",
+    "up"
+  ],
+  "confusion_matrix": [
+    [
+      40,
+      72
+    ],
+    [
+      51,
+      46
+    ]
+  ]
+}
