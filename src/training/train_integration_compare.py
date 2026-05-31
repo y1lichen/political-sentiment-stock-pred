@@ -6,12 +6,25 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+from sklearn.linear_model import LogisticRegression
 
 from src.config import TARGETS
 from src.evaluation.metrics import classification_metrics, signal_metrics
 from src.training.train import train
 
-LEGACY_TARGETS = ("0050.TW", "00632R.TW", "2303.TW", "2308.TW", "2317.TW", "2330.TW", "2376.TW", "2377.TW", "2382.TW", "2454.TW", "3711.TW")
+LEGACY_TARGETS = (
+    "0050.TW",
+    "00632R.TW",
+    "2303.TW",
+    "2308.TW",
+    "2317.TW",
+    "2330.TW",
+    "2376.TW",
+    "2377.TW",
+    "2382.TW",
+    "2454.TW",
+    "3711.TW",
+)
 
 
 def _build_args(
@@ -101,7 +114,15 @@ def _to_row(target: str, cfg: dict, metrics: dict, selected_from: str = ""):
     }
 
 
-def _row_from_predframe(target: str, config: str, model: str, feature_set: str, threshold: float, frame: pd.DataFrame, selected_from: str):
+def _row_from_predframe(
+    target: str,
+    config: str,
+    model: str,
+    feature_set: str,
+    threshold: float,
+    frame: pd.DataFrame,
+    selected_from: str,
+):
     test = frame[frame["split"] == "test"].copy()
     y_true = test["target_direction_1d"].astype(int).to_numpy()
     proba = test["pred_direction_proba"].astype(float).to_numpy()
@@ -133,12 +154,7 @@ def _row_from_predframe(target: str, config: str, model: str, feature_set: str, 
     }
 
 
-def _build_moe_blend(
-    market_pred: pd.DataFrame,
-    step3_pred: pd.DataFrame,
-    alpha_event: float,
-    beta_non_event: float,
-) -> pd.DataFrame:
+def _build_moe_blend(market_pred: pd.DataFrame, step3_pred: pd.DataFrame, alpha_event: float, beta_non_event: float) -> pd.DataFrame:
     join_cols = ["date", "split", "target_direction_1d", "target_return_1d", "event_gate_default"]
     base = market_pred[join_cols + ["pred_direction_proba"]].rename(columns={"pred_direction_proba": "proba_market"})
     extra = step3_pred[["date", "split", "pred_direction_proba"]].rename(columns={"pred_direction_proba": "proba_step3"})
@@ -161,6 +177,58 @@ def _safe_float(x, fallback: float = float("-inf")) -> float:
     if np.isnan(v):
         return fallback
     return v
+
+
+def _metrics_from_pred_frame(frame: pd.DataFrame, threshold: float) -> dict:
+    out: dict[str, dict[str, float]] = {}
+    for split in ["train", "val", "test"]:
+        part = frame[frame["split"] == split].copy()
+        if part.empty:
+            continue
+        y_true = part["target_direction_1d"].astype(int).to_numpy()
+        y_proba = part["pred_direction_proba"].astype(float).to_numpy()
+        cls = classification_metrics(y_true, y_proba)
+        sig = signal_metrics(part, threshold=threshold)
+        out[split] = {
+            "accuracy": cls.get("accuracy"),
+            "precision": cls.get("precision"),
+            "recall": cls.get("recall"),
+            "f1": cls.get("f1"),
+            "auc": cls.get("auc"),
+            "signal_coverage": sig.get("coverage"),
+            "signal_hit_rate": sig.get("hit_rate"),
+            "signal_cumulative_return": sig.get("cumulative_return"),
+            "signal_sharpe": sig.get("sharpe"),
+            "signal_compound_max_drawdown": sig.get("compound_max_drawdown"),
+            "signal_signal_count": sig.get("signal_count"),
+        }
+    return out
+
+
+def _apply_linear_head_event_only(frame: pd.DataFrame) -> pd.DataFrame:
+    """v9: linear calibration head is only applied on event days."""
+    out = frame.copy()
+    tr = out[out["split"] == "train"]
+    if tr.empty:
+        return out
+
+    x_train = tr[["pred_direction_proba"]].astype(float).to_numpy()
+    y_train = tr["target_direction_1d"].astype(int).to_numpy()
+
+    y_bin = (y_train > 0).astype(int)
+    if len(np.unique(y_bin)) < 2:
+        return out
+
+    lr = LogisticRegression(random_state=42, max_iter=1000)
+    lr.fit(x_train, y_bin)
+
+    event_mask = out["event_gate_default"].fillna(0).astype(int).eq(1).to_numpy()
+    if not event_mask.any():
+        return out
+
+    x_event = out.loc[event_mask, ["pred_direction_proba"]].astype(float).to_numpy()
+    out.loc[event_mask, "pred_direction_proba"] = lr.predict_proba(x_event)[:, 1]
+    return out
 
 
 def run_compare(args: argparse.Namespace) -> None:
@@ -204,8 +272,11 @@ def run_compare(args: argparse.Namespace) -> None:
         {"tag": "step3_integrated", "model": "elasticnet", "feature_set": "Global_plus_Trump_no_gate", "feature_budget": 80, "all_features": False, "signal_threshold": 0.55},
     ]
 
-    alpha_grid = [0.0, 0.25, 0.5, 0.75, 1.0]
-    beta_grid = [0.0, 0.1, 0.2, 0.3]
+    if args.deep_only:
+        step3_candidates = [c for c in step3_candidates if c["model"] in {"event_gated_mlp", "small_mlp"}]
+
+    alpha_grid = [0.0, 0.15, 0.30, 0.45, 0.60, 0.75, 0.90, 1.0]
+    beta_grid = [0.0, 0.05, 0.10, 0.20, 0.30]
 
     rows = []
     pred_frames = []
@@ -215,63 +286,71 @@ def run_compare(args: argparse.Namespace) -> None:
         for cfg in fixed_configs:
             metrics, pred = _train_and_load(project_root, cfg, target, args)
             rows.append(_to_row(target, cfg, metrics))
-            pred["target"] = target
-            pred["config"] = cfg["tag"]
-            pred["model"] = cfg["model"]
-            pred["feature_set"] = cfg["feature_set"]
-            pred_frames.append(pred)
-            fixed_pred[cfg["tag"]] = pred.copy()
+            p = pred.copy()
+            p["target"] = target
+            p["config"] = cfg["tag"]
+            p["model"] = cfg["model"]
+            p["feature_set"] = cfg["feature_set"]
+            pred_frames.append(p)
+            fixed_pred[cfg["tag"]] = p.copy()
 
-        best = None
-        best_val_score = float("-inf")
+        best_cfg = None
         best_metrics = None
         best_pred = None
-        # v7: 2454 走防過擬合與保守候選；其餘沿用 v6 目標
+        best_val_score = float("-inf")
+        best_variant = "raw"
+
         lam = float(args.val_auc_weight)
         target_candidates = step3_candidates
-        if target == "2454.TW":
-            target_candidates = [c for c in step3_candidates if c["model"] in {"elasticnet", "logistic", "small_mlp"}]
-            if not target_candidates:
-                target_candidates = step3_candidates
+        if (not args.deep_only) and target == "2454.TW":
+            target_candidates = [c for c in step3_candidates if c["model"] in {"elasticnet", "logistic", "small_mlp"}] or step3_candidates
 
         for cand in target_candidates:
-            metrics, pred = _train_and_load(project_root, cand, target, args)
-            train_m = metrics.get("train", {})
-            val_m = metrics.get("val", {})
+            metrics_raw, pred_raw = _train_and_load(project_root, cand, target, args)
+            variants = [("raw", metrics_raw, pred_raw)]
 
-            train_f1 = _safe_float(train_m.get("f1_macro", train_m.get("f1")))
-            val_f1 = _safe_float(val_m.get("f1_macro", val_m.get("f1")))
-            val_auc = _safe_float(val_m.get("auc"), fallback=0.5)
+            if args.v8_linear_head and cand["model"] in {"event_gated_mlp", "small_mlp"}:
+                pred_cal = _apply_linear_head_event_only(pred_raw)
+                metrics_cal = _metrics_from_pred_frame(pred_cal, threshold=float(cand["signal_threshold"]))
+                variants.append(("linear_head_event_only", metrics_cal, pred_cal))
 
-            overfit_gap = max(0.0, train_f1 - val_f1)
-            if target == "2454.TW":
-                # 對 2454 加強泛化約束，避免 val 高但 test 崩
-                score = val_f1 + (lam + 0.10) * val_auc - 0.50 * overfit_gap
-            else:
-                score = val_f1 + lam * val_auc
+            for variant_name, variant_metrics, variant_pred in variants:
+                train_m = variant_metrics.get("train", {})
+                val_m = variant_metrics.get("val", {})
+                train_f1 = _safe_float(train_m.get("f1_macro", train_m.get("f1")))
+                val_f1 = _safe_float(val_m.get("f1_macro", val_m.get("f1")))
+                val_auc = _safe_float(val_m.get("auc"), fallback=0.5)
 
-            if score > best_val_score:
-                best_val_score = float(score)
-                best = cand
-                best_metrics = metrics
-                best_pred = pred
+                overfit_gap = max(0.0, train_f1 - val_f1)
+                if (not args.deep_only) and target == "2454.TW":
+                    score = val_f1 + (lam + 0.10) * val_auc - 0.50 * overfit_gap
+                else:
+                    score = val_f1 + lam * val_auc
 
-        if best is None or best_metrics is None or best_pred is None:
+                if score > best_val_score:
+                    best_val_score = float(score)
+                    best_cfg = cand
+                    best_metrics = variant_metrics
+                    best_pred = variant_pred
+                    best_variant = variant_name
+
+        if best_cfg is None or best_metrics is None or best_pred is None:
             raise RuntimeError(f"No step3 candidate selected for target={target}")
 
         selected_label = (
-            f"model={best['model']}|fs={best['feature_set']}|budget={best['feature_budget']}|"
-            f"thr={best['signal_threshold']}|obj=v7_target_adaptive"
+            f"model={best_cfg['model']}|fs={best_cfg['feature_set']}|budget={best_cfg['feature_budget']}|"
+            f"thr={best_cfg['signal_threshold']}|variant={best_variant}|obj=v9_event_linear_moe"
         )
-        rows.append(_to_row(target, best, best_metrics, selected_from=selected_label))
-        best_pred["target"] = target
-        best_pred["config"] = "step3_integrated"
-        best_pred["model"] = best["model"]
-        best_pred["feature_set"] = best["feature_set"]
-        pred_frames.append(best_pred)
+        rows.append(_to_row(target, best_cfg, best_metrics, selected_from=selected_label))
+
+        step3_pred = best_pred.copy()
+        step3_pred["target"] = target
+        step3_pred["config"] = "step3_integrated"
+        step3_pred["model"] = best_cfg["model"] if best_variant == "raw" else f"{best_cfg['model']}+linear_head"
+        step3_pred["feature_set"] = best_cfg["feature_set"]
+        pred_frames.append(step3_pred)
 
         market_pred = fixed_pred["market_only"].copy()
-        step3_pred = best_pred.copy()
 
         best_alpha = 0.0
         best_beta = 0.0
@@ -282,12 +361,17 @@ def run_compare(args: argparse.Namespace) -> None:
             for beta in beta_grid:
                 fused = _build_moe_blend(market_pred, step3_pred, alpha_event=float(alpha), beta_non_event=float(beta))
                 val = fused[fused["split"] == "val"]
-                if len(val) == 0:
+                if val.empty:
                     continue
                 y_true = val["target_direction_1d"].astype(int).to_numpy()
                 y_proba = val["pred_direction_proba"].astype(float).to_numpy()
                 cls = classification_metrics(y_true, y_proba)
-                score = _safe_float(cls.get("f1")) + lam * _safe_float(cls.get("auc"), fallback=0.5)
+                sig = signal_metrics(val, threshold=float(args.signal_threshold))
+                score = (
+                    _safe_float(cls.get("f1"))
+                    + lam * _safe_float(cls.get("auc"), fallback=0.5)
+                    + 0.03 * _safe_float(sig.get("sharpe"), fallback=0.0)
+                )
                 if score > best_mix_score:
                     best_mix_score = float(score)
                     best_alpha = float(alpha)
@@ -304,7 +388,7 @@ def run_compare(args: argparse.Namespace) -> None:
             feature_set="event_gate_alpha_beta_blend",
             threshold=float(args.signal_threshold),
             frame=best_fused,
-            selected_from=f"alpha_event={best_alpha}|beta_non_event={best_beta}|obj=v7_target_adaptive",
+            selected_from=f"alpha_event={best_alpha}|beta_non_event={best_beta}|obj=v9_event_linear_moe",
         )
         rows.append(moe_row)
 
@@ -327,8 +411,8 @@ def run_compare(args: argparse.Namespace) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Integration runner v7: target-adaptive selection + alpha/beta blend.")
-    parser.add_argument("--targets", default="default", help="Comma-separated tickers, or 'default', 'all'/ 'all_legacy' (11 tickers).")
+    parser = argparse.ArgumentParser(description="Integration runner v9: event-only linear head + adaptive MoE.")
+    parser.add_argument("--targets", default="default", help="Comma-separated tickers, or 'default', 'all'/'all_legacy' (11 tickers).")
     parser.add_argument("--model", default="event_gated_mlp")
     parser.add_argument("--split", default="regime_aware", choices=["regime_matched", "all_history", "regime_aware"])
     parser.add_argument("--market-feature-set", default="TW_plus_global_market")
@@ -338,8 +422,10 @@ def main() -> None:
     parser.add_argument("--rebuild-dataset", action="store_true")
     parser.add_argument("--signal-threshold", type=float, default=0.55)
     parser.add_argument("--val-auc-weight", type=float, default=0.15)
-    parser.add_argument("--metrics-output", default="integration_compare_metrics_step3_v7.csv")
-    parser.add_argument("--predictions-output", default="integration_compare_predictions_step3_v7.csv")
+    parser.add_argument("--deep-only", action="store_true", help="Use only deep models in step3 candidate pool.")
+    parser.add_argument("--v8-linear-head", action="store_true", default=True, help="Enable deep+linear calibration head for deep models.")
+    parser.add_argument("--metrics-output", default="integration_compare_metrics_step3_v9.csv")
+    parser.add_argument("--predictions-output", default="integration_compare_predictions_step3_v9.csv")
     args = parser.parse_args()
     run_compare(args)
 
