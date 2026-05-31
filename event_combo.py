@@ -83,10 +83,25 @@ def parse_args():
         help="Use inverse-frequency class weights for the binary direction loss.",
     )
     parser.add_argument(
-        "--min-trade-prob",
+        "--trade-edge-threshold",
         type=float,
-        default=0.55,
-        help="Only trade when max(up/down probability) is at least this value.",
+        default=0.10,
+        help=(
+            "Neutral aggregation threshold. Trade LONG if prob_up - prob_down is above this, "
+            "SHORT if below its negative value, otherwise stay NEUTRAL."
+        ),
+    )
+    parser.add_argument(
+        "--auto-trade-threshold",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Tune trade-edge threshold on the validation set, then apply the chosen threshold to test.",
+    )
+    parser.add_argument(
+        "--min-val-trade-coverage",
+        type=float,
+        default=0.05,
+        help="Minimum validation trade coverage when auto-tuning the neutral threshold.",
     )
     parser.add_argument(
         "--trade-mode",
@@ -598,7 +613,7 @@ def train_model(args, train_ds, val_ds, market_dim, event_dim, device):
     return model, pd.DataFrame(history)
 
 
-def predictions_frame(metrics, min_trade_prob, trade_mode):
+def predictions_frame(metrics, trade_edge_threshold, trade_mode):
     out = pd.DataFrame(
         {
             "date": pd.to_datetime(metrics["dates"]),
@@ -618,9 +633,9 @@ def predictions_frame(metrics, min_trade_prob, trade_mode):
     out["pred_label_name"] = out["pred_label"].map(DIRECTION_LABELS)
     out["actual_regime_name"] = out["actual_regime"].map(REGIME_LABELS)
     out["pred_regime_name"] = out["pred_regime"].map(REGIME_LABELS)
-    out["max_prob"] = out[["prob_down", "prob_up"]].max(axis=1)
-    raw_signal = out["pred_label"].map({0: -1, 1: 1}).astype(float)
-    confident = out["max_prob"] >= min_trade_prob
+    out["direction_edge"] = out["prob_up"] - out["prob_down"]
+    raw_signal = np.where(out["direction_edge"] > 0, 1.0, -1.0)
+    confident = out["direction_edge"].abs() >= trade_edge_threshold
     if trade_mode == "long_cash":
         signal = np.where(confident & (raw_signal > 0), 1.0, 0.0)
     elif trade_mode == "short_cash":
@@ -628,8 +643,39 @@ def predictions_frame(metrics, min_trade_prob, trade_mode):
     else:
         signal = np.where(confident, raw_signal, 0.0)
     out["trade_signal"] = signal
+    out["trade_decision"] = out["trade_signal"].map({-1.0: "SHORT", 0.0: "NEUTRAL", 1.0: "LONG"})
     out["strategy_ret_no_cost"] = out["trade_signal"] * out["future_ret"]
     return out
+
+
+def strategy_metrics(pred_df):
+    return {
+        "trade_coverage": float((pred_df["trade_signal"] != 0).mean()),
+        "neutral_count": int((pred_df["trade_signal"] == 0).sum()),
+        "long_count": int((pred_df["trade_signal"] > 0).sum()),
+        "short_count": int((pred_df["trade_signal"] < 0).sum()),
+        "strategy_mean_return_no_cost": float(pred_df["strategy_ret_no_cost"].mean()),
+        "strategy_total_return_no_cost": float((1 + pred_df["strategy_ret_no_cost"]).prod() - 1),
+    }
+
+
+def tune_trade_threshold(metrics, trade_mode, fallback_threshold, min_coverage):
+    rows = []
+    for threshold in np.round(np.arange(0.0, 0.501, 0.025), 3):
+        pred_df = predictions_frame(metrics, threshold, trade_mode)
+        row = {"trade_edge_threshold": float(threshold), **strategy_metrics(pred_df)}
+        rows.append(row)
+
+    search_df = pd.DataFrame(rows)
+    eligible = search_df[search_df["trade_coverage"] >= min_coverage].copy()
+    if eligible.empty:
+        return fallback_threshold, search_df
+
+    eligible = eligible.sort_values(
+        ["strategy_total_return_no_cost", "trade_coverage"],
+        ascending=[False, False],
+    )
+    return float(eligible.iloc[0]["trade_edge_threshold"]), search_df
 
 
 def regime_conditioned_stats(frame, selected_events):
@@ -746,11 +792,28 @@ def main():
 
     criterion = nn.CrossEntropyLoss()
     regime_criterion = nn.CrossEntropyLoss()
+    val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False)
     test_loader = DataLoader(test_ds, batch_size=args.batch_size, shuffle=False)
+    val_metrics = evaluate(model, val_loader, criterion, regime_criterion, device)
+    selected_trade_edge_threshold = args.trade_edge_threshold
+    threshold_search_df = pd.DataFrame()
+    if args.auto_trade_threshold:
+        selected_trade_edge_threshold, threshold_search_df = tune_trade_threshold(
+            metrics=val_metrics,
+            trade_mode=args.trade_mode,
+            fallback_threshold=args.trade_edge_threshold,
+            min_coverage=args.min_val_trade_coverage,
+        )
+
+    val_pred_df = predictions_frame(
+        val_metrics,
+        trade_edge_threshold=selected_trade_edge_threshold,
+        trade_mode=args.trade_mode,
+    )
     test_metrics = evaluate(model, test_loader, criterion, regime_criterion, device)
     pred_df = predictions_frame(
         test_metrics,
-        min_trade_prob=args.min_trade_prob,
+        trade_edge_threshold=selected_trade_edge_threshold,
         trade_mode=args.trade_mode,
     )
 
@@ -769,6 +832,8 @@ def main():
     brute_df.to_csv(output_dir / "brute_force_all_events.csv", index=False)
     selected_df.to_csv(output_dir / "brute_force_selected_events.csv", index=False)
     history.to_csv(output_dir / "training_history.csv", index=False)
+    val_pred_df.to_csv(output_dir / "validation_predictions.csv", index=False)
+    threshold_search_df.to_csv(output_dir / "validation_trade_threshold_search.csv", index=False)
     pred_df.to_csv(output_dir / "test_predictions.csv", index=False)
     regime_stats = regime_conditioned_stats(usable, selected_events)
     regime_stats.to_csv(output_dir / "event_regime_conditioned_stats.csv", index=False)
@@ -793,7 +858,10 @@ def main():
         "binary_threshold": args.binary_threshold,
         "window": args.window,
         "trade_mode": args.trade_mode,
-        "min_trade_prob": args.min_trade_prob,
+        "trade_edge_threshold": args.trade_edge_threshold,
+        "selected_trade_edge_threshold": selected_trade_edge_threshold,
+        "auto_trade_threshold": args.auto_trade_threshold,
+        "min_val_trade_coverage": args.min_val_trade_coverage,
         "use_class_weights": args.use_class_weights,
         "device": device,
         "rows": {
@@ -807,15 +875,12 @@ def main():
             "event_regime": len(all_event_cols),
             "selected_events": len(selected_events),
         },
+        "validation_strategy": strategy_metrics(val_pred_df),
         "test": {
             "loss": test_metrics["loss"],
             "accuracy": test_metrics["acc"],
             "regime_accuracy": test_metrics["regime_acc"],
-            "trade_coverage": float((pred_df["trade_signal"] != 0).mean()),
-            "long_count": int((pred_df["trade_signal"] > 0).sum()),
-            "short_count": int((pred_df["trade_signal"] < 0).sum()),
-            "strategy_mean_return_no_cost": float(pred_df["strategy_ret_no_cost"].mean()),
-            "strategy_total_return_no_cost": float((1 + pred_df["strategy_ret_no_cost"]).prod() - 1),
+            **strategy_metrics(pred_df),
         },
         "classification_report": report,
         "confusion_matrix_labels": [DIRECTION_LABELS[i] for i in DIRECTION_LABELS],
@@ -829,9 +894,14 @@ def main():
     print(f"Test acc: {test_metrics['acc']:.4f}")
     print(f"Test regime acc: {test_metrics['regime_acc']:.4f}")
     print(
-        f"Trade mode: {args.trade_mode} | min_prob={args.min_trade_prob:.2f} | "
+        f"Selected trade edge threshold: {selected_trade_edge_threshold:.3f} "
+        f"(auto={args.auto_trade_threshold})"
+    )
+    print(
+        f"Trade mode: {args.trade_mode} | "
         f"coverage={summary['test']['trade_coverage']:.2%} | "
-        f"long={summary['test']['long_count']} | short={summary['test']['short_count']}"
+        f"long={summary['test']['long_count']} | short={summary['test']['short_count']} | "
+        f"neutral={summary['test']['neutral_count']}"
     )
     print(
         "Strategy return no cost: "

@@ -56,7 +56,8 @@ python event_combo.py \
   --target 2330.TW \
   --hold 1 \
   --binary-threshold 0.0 \
-  --min-trade-prob 0.55 \
+  --trade-edge-threshold 0.10 \
+  --auto-trade-threshold \
   --trade-mode long_short \
   --window 20 \
   --epochs 40 \
@@ -87,6 +88,8 @@ The output directory contains:
 - `summary.json`: metrics, feature counts, confusion matrix, and strategy return summary
 - `training_history.csv`: per-epoch train/validation metrics
 - `test_predictions.csv`: test-set predictions, probabilities, regimes, and next-day returns
+- `validation_predictions.csv`: validation-set predictions using the selected trade threshold
+- `validation_trade_threshold_search.csv`: validation threshold grid used by `--auto-trade-threshold`
 - `brute_force_all_events.csv`: all brute-force event statistics
 - `brute_force_selected_events.csv`: selected event rules used by DL
 - `event_regime_conditioned_stats.csv`: event performance split by market regime
@@ -97,9 +100,11 @@ This is a binary classification model for next-period direction: `down` or `up`.
 By default, next-period return `> 0` is labeled `up`; otherwise it is labeled `down`.
 You can change this cutoff with `--binary-threshold`.
 
-Binary classification accuracy is not the same as trading performance. The script therefore supports confidence-filtered trading:
+Binary classification accuracy is not the same as trading performance. The model's base direction is always binary, but the trading layer can abstain after aggregation:
 
-- `--min-trade-prob 0.55`: stay in cash when the model confidence is below 55%.
+- `direction_edge = prob_up - prob_down`
+- `--trade-edge-threshold 0.10`: LONG if edge >= 0.10, SHORT if edge <= -0.10, otherwise NEUTRAL.
+- `--auto-trade-threshold`: tune that NEUTRAL threshold on the validation set before applying it to test.
 - `--trade-mode long_short`: allow both long and short signals.
 - `--trade-mode long_cash`: only trade high-confidence `up` signals.
 - `--trade-mode short_cash`: only trade high-confidence `down` signals.
