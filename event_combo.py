@@ -109,7 +109,7 @@ def parse_args():
         default="long_short",
         help="Trading interpretation of binary predictions after confidence filtering.",
     )
-    parser.add_argument("--output-dir", default="data/output/deep_regime_fusion")
+    parser.add_argument("--output-dir", default="output/deep_regime_fusion")
     return parser.parse_args()
 
 
