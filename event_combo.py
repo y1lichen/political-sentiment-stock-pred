@@ -94,6 +94,12 @@ def parse_args():
         default="gated_mlp",
         help="Deep learning architecture. gated_mlp is recommended for small tabular datasets.",
     )
+    parser.add_argument(
+        "--feature-set",
+        choices=["full", "market_only"],
+        default="full",
+        help="Use full event+market features or a market-only baseline with Trump event features removed.",
+    )
     parser.add_argument("--hidden-dim", type=int, default=64)
     parser.add_argument("--dropout", type=float, default=0.25)
     parser.add_argument("--patience", type=int, default=8)
@@ -828,7 +834,8 @@ def regime_conditioned_stats(frame, selected_events):
     focus_events = [
         c
         for c in selected_events
-        if any(key in c for key in ["tariff", "china", "taiwan", "chips", "deal", "relief"])
+        if c in frame.columns
+        and any(key in c for key in ["tariff", "china", "taiwan", "chips", "deal", "relief"])
     ][:40]
 
     for event_col in focus_events:
@@ -894,11 +901,22 @@ def main():
         presidential_terms_only=args.presidential_terms_only,
     )
 
-    all_event_cols = selected_events + [
+    full_event_cols = selected_events + [
         c for c in frame.columns if "__x__regime_" in c
     ] + [c for c in COUNT_EVENT_COLS if c in frame.columns]
-    all_event_cols = list(dict.fromkeys(all_event_cols))
-    excluded = set(all_event_cols + ["future_ret", "direction_label", "regime_label", "term_segment"])
+    full_event_cols = list(dict.fromkeys(full_event_cols))
+
+    if args.feature_set == "market_only":
+        frame["event_dummy_zero"] = 0.0
+        all_event_cols = ["event_dummy_zero"]
+    else:
+        all_event_cols = full_event_cols
+
+    excluded = set(
+        full_event_cols
+        + all_event_cols
+        + ["future_ret", "direction_label", "regime_label", "term_segment"]
+    )
     market_cols = [c for c in frame.columns if c not in excluded]
 
     usable = frame[
@@ -923,6 +941,7 @@ def main():
     print("\nDataset summary:")
     print(f"Rows: train={len(train_df)}, val={len(val_df)}, test={len(test_df)}")
     print(f"Samples: train={len(train_ds)}, val={len(val_ds)}, test={len(test_ds)}")
+    print(f"Feature set: {args.feature_set}")
     print(f"Market features: {len(market_cols)} | Event/regime features: {len(all_event_cols)}")
     print("Direction label counts:")
     print(usable["direction_label"].map(DIRECTION_LABELS).value_counts().to_string())
@@ -996,6 +1015,7 @@ def main():
             "model_state_dict": model.state_dict(),
             "args": vars(args),
             "model_type": args.model_type,
+            "feature_set": args.feature_set,
             "market_cols": market_cols,
             "event_cols": all_event_cols,
             "direction_labels": DIRECTION_LABELS,
@@ -1014,6 +1034,7 @@ def main():
         "binary_threshold": args.binary_threshold,
         "window": args.window,
         "model_type": args.model_type,
+        "feature_set": args.feature_set,
         "trade_mode": args.trade_mode,
         "trade_edge_threshold": args.trade_edge_threshold,
         "selected_trade_edge_threshold": selected_trade_edge_threshold,

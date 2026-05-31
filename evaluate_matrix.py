@@ -26,7 +26,8 @@ TARGETS = [
     "3711.TW",
 ]
 
-STRATEGY_NAME = "my_gated_mlp_long_short" 
+STRATEGY_NAME = "full_event_market_gated_mlp"
+BASELINE_STRATEGY_NAME = "market_only_gated_mlp"
 OUTPUT_CSV_NAME = "my_model_vs_baseline.csv"
 
 # 你的 Gated MLP 啟動指令 (使用最好的設定)
@@ -53,32 +54,15 @@ def sharpe_like(returns):
         return 0.0
     return float(np.sqrt(252) * returns.mean() / std)
 
-def calculate_metrics(target, pred_path):
-    """計算與同學完全相同的指標和 Baseline (d_)"""
+def prediction_metrics(pred_path):
     df = pd.read_csv(pred_path)
-    
-    # 過濾出測試集 (假設 pred_path 裡已經是 test data)
+
     actual = df["actual_label"].astype(int).to_numpy()
     pred = df["pred_label"].astype(int).to_numpy()
     prob_up = df["prob_up"].astype(float).to_numpy()
-    
-    # 策略績效
     strategy_ret = df["strategy_ret_no_cost"].astype(float).to_numpy()
     trades = int((df["trade_signal"] != 0).sum())
-    
-    # Baseline: Buy and Hold (B&H)
-    bh_ret = df["future_ret"].astype(float).to_numpy()
-    bh_cumret = total_return(bh_ret)
-    bh_sharpe = sharpe_like(bh_ret)
-    
-    # Baseline: 簡單多數決
-    majority_class = int(pd.Series(actual).mode().iloc[0])
-    majority_pred = np.full(len(actual), majority_class, dtype=int)
-    
-    # Baseline: 隨機亂猜
-    bh_auc = 0.5 
-    
-    # --- 1. 計算你的模型指標 ---
+
     macro_f1 = f1_score(actual, pred, average="macro")
     precision = precision_score(actual, pred, pos_label=1, zero_division=0)
     recall = recall_score(actual, pred, pos_label=1, zero_division=0)
@@ -87,37 +71,55 @@ def calculate_metrics(target, pred_path):
         auc = roc_auc_score(actual, prob_up)
     except ValueError:
         auc = 0.5
-        
+
     cumret = total_return(strategy_ret)
     sharpe = sharpe_like(strategy_ret)
 
-    # --- 2. 計算 Baseline 分類指標 ---
-    bh_macro_f1 = f1_score(actual, majority_pred, average="macro")
-    bh_precision = precision_score(actual, majority_pred, pos_label=1, zero_division=0)
-    bh_recall = recall_score(actual, majority_pred, pos_label=1, zero_division=0)
-    bh_accuracy = accuracy_score(actual, majority_pred)
-    total_days = len(actual) 
-    
-    # --- 3. 組合並計算 Delta (d_) ---
+    return {
+        "macro_f1": macro_f1,
+        "precision": precision,
+        "recall": recall,
+        "accuracy": accuracy,
+        "auc": auc,
+        "sharpe": sharpe,
+        "cumret": cumret,
+        "trades": trades,
+    }
+
+
+def calculate_metrics(target, full_pred_path, baseline_pred_path):
+    """計算 full event+market model 與 market-only model baseline 的差異。"""
+    full = prediction_metrics(full_pred_path)
+    baseline = prediction_metrics(baseline_pred_path)
+
     return {
         "target": target,
         "strategy": STRATEGY_NAME,
-        "macro_f1": macro_f1,
-        "d_macro_f1": macro_f1 - bh_macro_f1,
-        "precision": precision,
-        "d_precision": precision - bh_precision,
-        "recall": recall,
-        "d_recall": recall - bh_recall,
-        "accuracy": accuracy,
-        "d_accuracy": accuracy - bh_accuracy,
-        "auc": auc,
-        "d_auc": auc - bh_auc,
-        "sharpe": sharpe,
-        "d_sharpe": sharpe - bh_sharpe,
-        "cumret": cumret,
-        "d_cumret": cumret - bh_cumret,
-        "trades": trades,
-        "d_trades": trades - total_days
+        "baseline": BASELINE_STRATEGY_NAME,
+        "macro_f1": full["macro_f1"],
+        "d_macro_f1": full["macro_f1"] - baseline["macro_f1"],
+        "precision": full["precision"],
+        "d_precision": full["precision"] - baseline["precision"],
+        "recall": full["recall"],
+        "d_recall": full["recall"] - baseline["recall"],
+        "accuracy": full["accuracy"],
+        "d_accuracy": full["accuracy"] - baseline["accuracy"],
+        "auc": full["auc"],
+        "d_auc": full["auc"] - baseline["auc"],
+        "sharpe": full["sharpe"],
+        "d_sharpe": full["sharpe"] - baseline["sharpe"],
+        "cumret": full["cumret"],
+        "d_cumret": full["cumret"] - baseline["cumret"],
+        "trades": full["trades"],
+        "d_trades": full["trades"] - baseline["trades"],
+        "baseline_macro_f1": baseline["macro_f1"],
+        "baseline_precision": baseline["precision"],
+        "baseline_recall": baseline["recall"],
+        "baseline_accuracy": baseline["accuracy"],
+        "baseline_auc": baseline["auc"],
+        "baseline_sharpe": baseline["sharpe"],
+        "baseline_cumret": baseline["cumret"],
+        "baseline_trades": baseline["trades"],
     }
 
 def main():
@@ -125,25 +127,44 @@ def main():
     
     for target in TARGETS:
         print(f"\n{'-'*50}")
-        print(f"🚀 開始訓練: {target}")
+        print(f"🚀 開始訓練 full model 與 market-only baseline: {target}")
         print(f"{'-'*50}")
         
         target_out_dir = f"data/output/run_all_compare/{target}"
-        os.makedirs(target_out_dir, exist_ok=True)
+        full_out_dir = os.path.join(target_out_dir, "full")
+        baseline_out_dir = os.path.join(target_out_dir, "market_only")
+        os.makedirs(full_out_dir, exist_ok=True)
+        os.makedirs(baseline_out_dir, exist_ok=True)
         
-        cmd = BASE_CMD + ["--target", target, "--output-dir", target_out_dir]
+        full_cmd = BASE_CMD + [
+            "--target", target,
+            "--feature-set", "full",
+            "--output-dir", full_out_dir,
+        ]
+        baseline_cmd = BASE_CMD + [
+            "--target", target,
+            "--feature-set", "market_only",
+            "--output-dir", baseline_out_dir,
+        ]
         
         try:
-            # 呼叫你的 event_combo.py 進行訓練
-            subprocess.run(cmd, check=True)
+            subprocess.run(full_cmd, check=True)
+            subprocess.run(baseline_cmd, check=True)
             
-            pred_path = os.path.join(target_out_dir, "test_predictions.csv")
-            if os.path.exists(pred_path):
-                target_metrics = calculate_metrics(target, pred_path)
+            full_pred_path = os.path.join(full_out_dir, "test_predictions.csv")
+            baseline_pred_path = os.path.join(baseline_out_dir, "test_predictions.csv")
+            if os.path.exists(full_pred_path) and os.path.exists(baseline_pred_path):
+                target_metrics = calculate_metrics(target, full_pred_path, baseline_pred_path)
                 results.append(target_metrics)
-                print(f"✅ {target} 完成! Accuracy: {target_metrics['accuracy']:.4f}, CumRet: {target_metrics['cumret']:.4f}")
+                print(
+                    f"✅ {target} 完成! "
+                    f"Accuracy: {target_metrics['accuracy']:.4f} "
+                    f"(d={target_metrics['d_accuracy']:+.4f}), "
+                    f"CumRet: {target_metrics['cumret']:.4f} "
+                    f"(d={target_metrics['d_cumret']:+.4f})"
+                )
             else:
-                print(f"❌ 找不到預測檔: {pred_path}")
+                print(f"❌ 找不到預測檔: {full_pred_path} 或 {baseline_pred_path}")
                 
         except subprocess.CalledProcessError as e:
             print(f"❌ 訓練 {target} 失敗: {e}")
@@ -152,9 +173,12 @@ def main():
     if results:
         # 強制與同學報表的欄位順序一模一樣
         columns_order = [
-            'target', 'strategy', 'macro_f1', 'd_macro_f1', 'precision', 'd_precision', 
+            'target', 'strategy', 'baseline', 'macro_f1', 'd_macro_f1', 'precision', 'd_precision',
             'recall', 'd_recall', 'accuracy', 'd_accuracy', 'auc', 'd_auc', 
-            'sharpe', 'd_sharpe', 'cumret', 'd_cumret', 'trades', 'd_trades'
+            'sharpe', 'd_sharpe', 'cumret', 'd_cumret', 'trades', 'd_trades',
+            'baseline_macro_f1', 'baseline_precision', 'baseline_recall',
+            'baseline_accuracy', 'baseline_auc', 'baseline_sharpe',
+            'baseline_cumret', 'baseline_trades'
         ]
         
         df_results = pd.DataFrame(results)[columns_order]
