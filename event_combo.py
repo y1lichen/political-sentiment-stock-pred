@@ -75,7 +75,12 @@ def parse_args():
         default=0.0,
         help="Future return threshold for binary label. > threshold is up, otherwise down.",
     )
-    parser.add_argument("--window", type=int, default=20, help="LSTM lookback window.")
+    parser.add_argument(
+        "--window",
+        type=int,
+        default=20,
+        help="Lookback window for --model-type lstm. Ignored by gated_mlp except for split overlap.",
+    )
     parser.add_argument("--min-n", type=int, default=20, help="Minimum samples for a brute-force event combo.")
     parser.add_argument("--min-abs-mean-ret", type=float, default=0.001, help="Minimum absolute mean return.")
     parser.add_argument("--min-hit-rate", type=float, default=0.55, help="Minimum directional hit rate.")
@@ -83,7 +88,13 @@ def parse_args():
     parser.add_argument("--epochs", type=int, default=40)
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--lr", type=float, default=1e-3)
-    parser.add_argument("--hidden-dim", type=int, default=96)
+    parser.add_argument(
+        "--model-type",
+        choices=["gated_mlp", "lstm"],
+        default="gated_mlp",
+        help="Deep learning architecture. gated_mlp is recommended for small tabular datasets.",
+    )
+    parser.add_argument("--hidden-dim", type=int, default=64)
     parser.add_argument("--dropout", type=float, default=0.25)
     parser.add_argument("--patience", type=int, default=8)
     parser.add_argument("--seed", type=int, default=42)
@@ -416,7 +427,7 @@ def build_model_frame(
 
 
 class FusionDataset(Dataset):
-    def __init__(self, df, market_cols, event_cols, window):
+    def __init__(self, df, market_cols, event_cols, window, model_type):
         self.market_x = df[market_cols].astype(np.float32).values
         self.event_x = df[event_cols].astype(np.float32).values
         self.y = df["direction_label"].astype(np.int64).values
@@ -425,9 +436,13 @@ class FusionDataset(Dataset):
         self.dates = df.index.astype(str).to_numpy()
         self.term_segment = df["term_segment"].astype(np.int64).values
         self.window = window
+        self.model_type = model_type
         self.indices = self._valid_start_indices()
 
     def _valid_start_indices(self):
+        if self.model_type == "gated_mlp":
+            return np.arange(len(self.y), dtype=np.int64)
+
         indices = []
         for segment in pd.unique(self.term_segment):
             positions = np.flatnonzero(self.term_segment == segment)
@@ -443,11 +458,22 @@ class FusionDataset(Dataset):
     def __len__(self):
         return len(self.indices)
 
+    def target_indices(self):
+        if self.model_type == "gated_mlp":
+            return self.indices
+        return self.indices + self.window
+
     def __getitem__(self, idx):
-        start = int(self.indices[idx])
-        end = start + self.window
+        if self.model_type == "gated_mlp":
+            end = int(self.indices[idx])
+            market_x = self.market_x[end]
+        else:
+            start = int(self.indices[idx])
+            end = start + self.window
+            market_x = self.market_x[start:end]
+
         return {
-            "market_x": torch.tensor(self.market_x[start:end]),
+            "market_x": torch.tensor(market_x),
             "event_x": torch.tensor(self.event_x[end]),
             "y": torch.tensor(self.y[end]),
             "regime_y": torch.tensor(self.regime_y[end]),
@@ -503,6 +529,73 @@ class RegimeFusionLSTM(nn.Module):
         logits = self.direction_head(torch.cat([market_state, fused_event], dim=1))
         regime_logits = self.regime_head(market_state)
         return logits, regime_logits, gate
+
+
+class RegimeFusionMLP(nn.Module):
+    def __init__(self, market_dim, event_dim, hidden_dim, dropout):
+        super().__init__()
+        self.market_encoder = nn.Sequential(
+            nn.Linear(market_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+        )
+        self.event_encoder = nn.Sequential(
+            nn.Linear(event_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+        )
+        self.regime_head = nn.Sequential(
+            nn.LayerNorm(hidden_dim),
+            nn.Linear(hidden_dim, hidden_dim // 2),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim // 2, len(REGIME_LABELS)),
+        )
+        self.gate = nn.Sequential(
+            nn.Linear(hidden_dim * 2, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.Sigmoid(),
+        )
+        self.direction_head = nn.Sequential(
+            nn.LayerNorm(hidden_dim * 2),
+            nn.Linear(hidden_dim * 2, hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, len(DIRECTION_LABELS)),
+        )
+
+    def forward(self, market_x, event_x):
+        market_state = self.market_encoder(market_x)
+        event_state = self.event_encoder(event_x)
+        gate = self.gate(torch.cat([market_state, event_state], dim=1))
+        fused_event = gate * event_state
+        logits = self.direction_head(torch.cat([market_state, fused_event], dim=1))
+        regime_logits = self.regime_head(market_state)
+        return logits, regime_logits, gate
+
+
+def make_model(args, market_dim, event_dim):
+    if args.model_type == "lstm":
+        return RegimeFusionLSTM(
+            market_dim=market_dim,
+            event_dim=event_dim,
+            hidden_dim=args.hidden_dim,
+            dropout=args.dropout,
+        )
+
+    return RegimeFusionMLP(
+        market_dim=market_dim,
+        event_dim=event_dim,
+        hidden_dim=args.hidden_dim,
+        dropout=args.dropout,
+    )
 
 
 def split_and_scale(frame, market_cols, event_cols, window):
@@ -589,7 +682,7 @@ def evaluate(model, loader, criterion, regime_criterion, device):
 
 
 def class_weight_tensor(dataset, num_classes, device):
-    labels = dataset.y[dataset.indices + dataset.window]
+    labels = dataset.y[dataset.target_indices()]
     counts = np.bincount(labels, minlength=num_classes).astype(np.float32)
     counts = np.maximum(counts, 1.0)
     weights = counts.sum() / (num_classes * counts)
@@ -600,12 +693,7 @@ def train_model(args, train_ds, val_ds, market_dim, event_dim, device):
     train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True)
     val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False)
 
-    model = RegimeFusionLSTM(
-        market_dim=market_dim,
-        event_dim=event_dim,
-        hidden_dim=args.hidden_dim,
-        dropout=args.dropout,
-    ).to(device)
+    model = make_model(args, market_dim, event_dim).to(device)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
     direction_weights = None
@@ -828,9 +916,9 @@ def main():
     train_df, val_df, test_df, market_scaler, event_scaler = split_and_scale(
         usable, market_cols, all_event_cols, args.window
     )
-    train_ds = FusionDataset(train_df, market_cols, all_event_cols, args.window)
-    val_ds = FusionDataset(val_df, market_cols, all_event_cols, args.window)
-    test_ds = FusionDataset(test_df, market_cols, all_event_cols, args.window)
+    train_ds = FusionDataset(train_df, market_cols, all_event_cols, args.window, args.model_type)
+    val_ds = FusionDataset(val_df, market_cols, all_event_cols, args.window, args.model_type)
+    test_ds = FusionDataset(test_df, market_cols, all_event_cols, args.window, args.model_type)
 
     print("\nDataset summary:")
     print(f"Rows: train={len(train_df)}, val={len(val_df)}, test={len(test_df)}")
@@ -845,6 +933,7 @@ def main():
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"\nTraining on device: {device}")
+    print(f"Model type: {args.model_type}")
     model, history = train_model(
         args=args,
         train_ds=train_ds,
@@ -906,6 +995,7 @@ def main():
         {
             "model_state_dict": model.state_dict(),
             "args": vars(args),
+            "model_type": args.model_type,
             "market_cols": market_cols,
             "event_cols": all_event_cols,
             "direction_labels": DIRECTION_LABELS,
@@ -923,6 +1013,7 @@ def main():
         "presidential_terms": PRESIDENTIAL_TERMS,
         "binary_threshold": args.binary_threshold,
         "window": args.window,
+        "model_type": args.model_type,
         "trade_mode": args.trade_mode,
         "trade_edge_threshold": args.trade_edge_threshold,
         "selected_trade_edge_threshold": selected_trade_edge_threshold,

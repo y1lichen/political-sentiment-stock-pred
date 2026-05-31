@@ -25,8 +25,9 @@ python event_combo.py
    - `oversold`
    - `neutral`
 5. Adds event-regime interaction terms, for example tariff signals under high VIX or oversold markets.
-6. Trains a PyTorch gated-fusion LSTM:
-   - market sequence branch: learns current market regime from recent market history
+6. Trains a PyTorch deep fusion model:
+   - default `gated_mlp`: compact market/event encoders for small tabular datasets
+   - optional `lstm`: market sequence branch for longer continuous datasets
    - event branch: encodes brute-force Trump signals and event-regime interactions
    - gate: lets market regime control how strongly event signals affect prediction
    - auxiliary regime head: forces the model to learn regime classification
@@ -56,6 +57,7 @@ python event_combo.py \
   --target 2330.TW \
   --hold 1 \
   --presidential-terms-only \
+  --model-type gated_mlp \
   --binary-threshold 0.0 \
   --trade-edge-threshold 0.10 \
   --auto-trade-threshold \
@@ -106,7 +108,9 @@ By default, `--presidential-terms-only` removes Trump's out-of-office period fro
 - first term: 2017-01-20 through 2021-01-19
 - second term: 2025-01-20 onward
 
-The LSTM dataset keeps these as separate time segments, so a lookback window cannot jump from 2021 directly to 2025.
+The dataset keeps these as separate time segments, so an LSTM lookback window cannot jump from 2021 directly to 2025.
+
+For the reduced presidential-term-only dataset, `--model-type gated_mlp` is recommended because it remains a deep learning model while using fewer parameters than the LSTM.
 
 Binary classification accuracy is not the same as trading performance. The model's base direction is always binary, but the trading layer can abstain after aggregation:
 
