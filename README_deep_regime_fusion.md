@@ -55,6 +55,7 @@ Recommended full run:
 python event_combo.py \
   --target 2330.TW \
   --hold 1 \
+  --presidential-terms-only \
   --binary-threshold 0.0 \
   --trade-edge-threshold 0.10 \
   --auto-trade-threshold \
@@ -99,6 +100,13 @@ The output directory contains:
 This is a binary classification model for next-period direction: `down` or `up`.
 By default, next-period return `> 0` is labeled `up`; otherwise it is labeled `down`.
 You can change this cutoff with `--binary-threshold`.
+
+By default, `--presidential-terms-only` removes Trump's out-of-office period from model samples:
+
+- first term: 2017-01-20 through 2021-01-19
+- second term: 2025-01-20 onward
+
+The LSTM dataset keeps these as separate time segments, so a lookback window cannot jump from 2021 directly to 2025.
 
 Binary classification accuracy is not the same as trading performance. The model's base direction is always binary, but the trading layer can abstain after aggregation:
 

@@ -48,6 +48,11 @@ DIRECTION_LABELS = {
     1: "up",
 }
 
+PRESIDENTIAL_TERMS = [
+    ("2017-01-20", "2021-01-19"),
+    ("2025-01-20", "2100-12-31"),
+]
+
 
 def parse_args():
     parser = argparse.ArgumentParser(
@@ -58,6 +63,12 @@ def parse_args():
     )
     parser.add_argument("--target", default="2330.TW", help="Target ticker in global_prices.csv.")
     parser.add_argument("--hold", type=int, default=1, help="Prediction horizon in trading days.")
+    parser.add_argument(
+        "--presidential-terms-only",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Keep only Trump presidential-term samples and remove out-of-office dates.",
+    )
     parser.add_argument(
         "--binary-threshold",
         type=float,
@@ -109,7 +120,7 @@ def parse_args():
         default="long_short",
         help="Trading interpretation of binary predictions after confidence filtering.",
     )
-    parser.add_argument("--output-dir", default="output/deep_regime_fusion")
+    parser.add_argument("--output-dir", default="data/output/deep_regime_fusion")
     return parser.parse_args()
 
 
@@ -134,6 +145,22 @@ def read_event_data(path):
     event_df = pd.read_csv(path)
     event_df["trump_date"] = pd.to_datetime(event_df["trump_date"])
     return event_df.sort_values("trump_date").set_index("trump_date")
+
+
+def presidential_term_segment(index):
+    dates = pd.to_datetime(index)
+    segment = pd.Series(0, index=index, dtype="int64")
+    for i, (start, end) in enumerate(PRESIDENTIAL_TERMS, start=1):
+        mask = (dates >= pd.Timestamp(start)) & (dates <= pd.Timestamp(end))
+        segment.loc[mask] = i
+    return segment
+
+
+def filter_presidential_terms(df):
+    segment = presidential_term_segment(df.index)
+    out = df.loc[segment > 0].copy()
+    out["term_segment"] = segment.loc[out.index].astype(int)
+    return out
 
 
 def binary_event_columns(event_df):
@@ -354,7 +381,16 @@ def add_event_regime_interactions(df, selected_events):
     return out
 
 
-def build_model_frame(price_df, event_df, selected_events, combo_df, target, hold, binary_threshold):
+def build_model_frame(
+    price_df,
+    event_df,
+    selected_events,
+    combo_df,
+    target,
+    hold,
+    binary_threshold,
+    presidential_terms_only,
+):
     market = make_market_features(price_df, target)
     events = combo_df[selected_events].copy()
     counts = event_df[[c for c in COUNT_EVENT_COLS if c in event_df.columns]].copy()
@@ -372,6 +408,10 @@ def build_model_frame(price_df, event_df, selected_events, combo_df, target, hol
 
     frame = frame.replace([np.inf, -np.inf], np.nan).sort_index()
     frame = frame.dropna(subset=["future_ret", "direction_label", "regime_label"])
+    if presidential_terms_only:
+        frame = filter_presidential_terms(frame)
+    else:
+        frame["term_segment"] = 1
     return frame
 
 
@@ -383,15 +423,31 @@ class FusionDataset(Dataset):
         self.regime_y = df["regime_label"].astype(np.int64).values
         self.future_ret = df["future_ret"].astype(np.float32).values
         self.dates = df.index.astype(str).to_numpy()
+        self.term_segment = df["term_segment"].astype(np.int64).values
         self.window = window
+        self.indices = self._valid_start_indices()
+
+    def _valid_start_indices(self):
+        indices = []
+        for segment in pd.unique(self.term_segment):
+            positions = np.flatnonzero(self.term_segment == segment)
+            if len(positions) <= self.window:
+                continue
+            for offset in range(0, len(positions) - self.window):
+                start = positions[offset]
+                end = positions[offset + self.window]
+                if end - start == self.window:
+                    indices.append(start)
+        return np.asarray(indices, dtype=np.int64)
 
     def __len__(self):
-        return len(self.y) - self.window
+        return len(self.indices)
 
     def __getitem__(self, idx):
-        end = idx + self.window
+        start = int(self.indices[idx])
+        end = start + self.window
         return {
-            "market_x": torch.tensor(self.market_x[idx:end]),
+            "market_x": torch.tensor(self.market_x[start:end]),
             "event_x": torch.tensor(self.event_x[end]),
             "y": torch.tensor(self.y[end]),
             "regime_y": torch.tensor(self.regime_y[end]),
@@ -533,7 +589,7 @@ def evaluate(model, loader, criterion, regime_criterion, device):
 
 
 def class_weight_tensor(dataset, num_classes, device):
-    labels = dataset.y[dataset.window :]
+    labels = dataset.y[dataset.indices + dataset.window]
     counts = np.bincount(labels, minlength=num_classes).astype(np.float32)
     counts = np.maximum(counts, 1.0)
     weights = counts.sum() / (num_classes * counts)
@@ -718,6 +774,9 @@ def main():
 
     price_df = read_price_data(PRICE_PATH, args.target)
     event_df = read_event_data(EVENT_PATH)
+    if args.presidential_terms_only:
+        event_segment = presidential_term_segment(event_df.index)
+        event_df = event_df.loc[event_segment > 0].copy()
     price = price_df[args.target].dropna()
     combo_df, base_event_cols = make_event_combos(event_df)
     selected_events, brute_df, selected_df = brute_force_events(
@@ -744,16 +803,19 @@ def main():
         target=args.target,
         hold=args.hold,
         binary_threshold=args.binary_threshold,
+        presidential_terms_only=args.presidential_terms_only,
     )
 
     all_event_cols = selected_events + [
         c for c in frame.columns if "__x__regime_" in c
     ] + [c for c in COUNT_EVENT_COLS if c in frame.columns]
     all_event_cols = list(dict.fromkeys(all_event_cols))
-    excluded = set(all_event_cols + ["future_ret", "direction_label", "regime_label"])
+    excluded = set(all_event_cols + ["future_ret", "direction_label", "regime_label", "term_segment"])
     market_cols = [c for c in frame.columns if c not in excluded]
 
-    usable = frame[market_cols + all_event_cols + ["future_ret", "direction_label", "regime_label"]].copy()
+    usable = frame[
+        market_cols + all_event_cols + ["future_ret", "direction_label", "regime_label", "term_segment"]
+    ].copy()
     usable[market_cols + all_event_cols] = usable[market_cols + all_event_cols].fillna(0)
     usable = usable.dropna()
 
@@ -778,6 +840,8 @@ def main():
     print(usable["direction_label"].map(DIRECTION_LABELS).value_counts().to_string())
     print("Regime label counts:")
     print(usable["regime_label"].map(REGIME_LABELS).value_counts().to_string())
+    print("Term segment counts:")
+    print(usable["term_segment"].value_counts().sort_index().to_string())
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"\nTraining on device: {device}")
@@ -855,6 +919,8 @@ def main():
     summary = {
         "target": args.target,
         "hold": args.hold,
+        "presidential_terms_only": args.presidential_terms_only,
+        "presidential_terms": PRESIDENTIAL_TERMS,
         "binary_threshold": args.binary_threshold,
         "window": args.window,
         "trade_mode": args.trade_mode,
@@ -869,6 +935,9 @@ def main():
             "train": int(len(train_df)),
             "val": int(len(val_df)),
             "test": int(len(test_df)),
+        },
+        "term_segment_counts": {
+            str(k): int(v) for k, v in usable["term_segment"].value_counts().sort_index().items()
         },
         "features": {
             "market": len(market_cols),
