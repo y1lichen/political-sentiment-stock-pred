@@ -1,0 +1,84 @@
+{
+  "target": "2330.TW",
+  "hold": 1,
+  "binary_threshold": 0.0,
+  "window": 20,
+  "trade_mode": "long_short",
+  "trade_edge_threshold": 0.1,
+  "selected_trade_edge_threshold": 0.1,
+  "auto_trade_threshold": true,
+  "min_val_trade_coverage": 0.05,
+  "use_class_weights": true,
+  "device": "cuda",
+  "rows": {
+    "usable": 2442,
+    "train": 1709,
+    "val": 386,
+    "test": 387
+  },
+  "features": {
+    "market": 49,
+    "event_regime": 149,
+    "selected_events": 58
+  },
+  "validation_strategy": {
+    "trade_coverage": 0.5109289617486339,
+    "neutral_count": 179,
+    "long_count": 143,
+    "short_count": 44,
+    "strategy_mean_return_no_cost": 0.000721085470874636,
+    "strategy_total_return_no_cost": 0.26554063781562864
+  },
+  "test": {
+    "loss": 0.8352736539996612,
+    "accuracy": 0.5340599455040872,
+    "regime_accuracy": 0.779291553133515,
+    "trade_coverage": 0.25340599455040874,
+    "neutral_count": 274,
+    "long_count": 36,
+    "short_count": 57,
+    "strategy_mean_return_no_cost": -0.00018089703202998767,
+    "strategy_total_return_no_cost": -0.09224850319940381
+  },
+  "classification_report": {
+    "down": {
+      "precision": 0.562753036437247,
+      "recall": 0.6881188118811881,
+      "f1-score": 0.6191536748329621,
+      "support": 202.0
+    },
+    "up": {
+      "precision": 0.475,
+      "recall": 0.34545454545454546,
+      "f1-score": 0.4,
+      "support": 165.0
+    },
+    "accuracy": 0.5340599455040872,
+    "macro avg": {
+      "precision": 0.5188765182186235,
+      "recall": 0.5167866786678668,
+      "f1-score": 0.5095768374164811,
+      "support": 367.0
+    },
+    "weighted avg": {
+      "precision": 0.5233000364041522,
+      "recall": 0.5340599455040872,
+      "f1-score": 0.5206240935047911,
+      "support": 367.0
+    }
+  },
+  "confusion_matrix_labels": [
+    "down",
+    "up"
+  ],
+  "confusion_matrix": [
+    [
+      139,
+      63
+    ],
+    [
+      108,
+      57
+    ]
+  ]
+}
