@@ -56,6 +56,8 @@ python event_combo.py \
   --target 2330.TW \
   --hold 1 \
   --binary-threshold 0.0 \
+  --min-trade-prob 0.55 \
+  --trade-mode long_short \
   --window 20 \
   --epochs 40 \
   --batch-size 64 \
@@ -94,5 +96,13 @@ The output directory contains:
 This is a binary classification model for next-period direction: `down` or `up`.
 By default, next-period return `> 0` is labeled `up`; otherwise it is labeled `down`.
 You can change this cutoff with `--binary-threshold`.
+
+Binary classification accuracy is not the same as trading performance. The script therefore supports confidence-filtered trading:
+
+- `--min-trade-prob 0.55`: stay in cash when the model confidence is below 55%.
+- `--trade-mode long_short`: allow both long and short signals.
+- `--trade-mode long_cash`: only trade high-confidence `up` signals.
+- `--trade-mode short_cash`: only trade high-confidence `down` signals.
+
 It uses a time split and rolling/lagged features where applicable to reduce look-ahead leakage.
 Reported strategy returns are diagnostic only and do not include fees, slippage, borrow costs, or position sizing.

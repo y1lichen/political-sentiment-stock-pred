@@ -76,6 +76,24 @@ def parse_args():
     parser.add_argument("--dropout", type=float, default=0.25)
     parser.add_argument("--patience", type=int, default=8)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument(
+        "--use-class-weights",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Use inverse-frequency class weights for the binary direction loss.",
+    )
+    parser.add_argument(
+        "--min-trade-prob",
+        type=float,
+        default=0.55,
+        help="Only trade when max(up/down probability) is at least this value.",
+    )
+    parser.add_argument(
+        "--trade-mode",
+        choices=["long_short", "long_cash", "short_cash"],
+        default="long_short",
+        help="Trading interpretation of binary predictions after confidence filtering.",
+    )
     parser.add_argument("--output-dir", default="data/output/deep_regime_fusion")
     return parser.parse_args()
 
@@ -499,6 +517,14 @@ def evaluate(model, loader, criterion, regime_criterion, device):
     }
 
 
+def class_weight_tensor(dataset, num_classes, device):
+    labels = dataset.y[dataset.window :]
+    counts = np.bincount(labels, minlength=num_classes).astype(np.float32)
+    counts = np.maximum(counts, 1.0)
+    weights = counts.sum() / (num_classes * counts)
+    return torch.tensor(weights, dtype=torch.float32, device=device)
+
+
 def train_model(args, train_ds, val_ds, market_dim, event_dim, device):
     train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True)
     val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False)
@@ -511,7 +537,12 @@ def train_model(args, train_ds, val_ds, market_dim, event_dim, device):
     ).to(device)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
-    criterion = nn.CrossEntropyLoss()
+    direction_weights = None
+    if args.use_class_weights:
+        direction_weights = class_weight_tensor(train_ds, len(DIRECTION_LABELS), device)
+        print(f"Direction class weights: {direction_weights.detach().cpu().numpy().round(4).tolist()}")
+
+    criterion = nn.CrossEntropyLoss(weight=direction_weights)
     regime_criterion = nn.CrossEntropyLoss()
 
     best_state = None
@@ -567,7 +598,7 @@ def train_model(args, train_ds, val_ds, market_dim, event_dim, device):
     return model, pd.DataFrame(history)
 
 
-def predictions_frame(metrics):
+def predictions_frame(metrics, min_trade_prob, trade_mode):
     out = pd.DataFrame(
         {
             "date": pd.to_datetime(metrics["dates"]),
@@ -587,8 +618,17 @@ def predictions_frame(metrics):
     out["pred_label_name"] = out["pred_label"].map(DIRECTION_LABELS)
     out["actual_regime_name"] = out["actual_regime"].map(REGIME_LABELS)
     out["pred_regime_name"] = out["pred_regime"].map(REGIME_LABELS)
-    signal = out["pred_label"].map({0: -1, 1: 1}).astype(float)
-    out["strategy_ret_no_cost"] = signal * out["future_ret"]
+    out["max_prob"] = out[["prob_down", "prob_up"]].max(axis=1)
+    raw_signal = out["pred_label"].map({0: -1, 1: 1}).astype(float)
+    confident = out["max_prob"] >= min_trade_prob
+    if trade_mode == "long_cash":
+        signal = np.where(confident & (raw_signal > 0), 1.0, 0.0)
+    elif trade_mode == "short_cash":
+        signal = np.where(confident & (raw_signal < 0), -1.0, 0.0)
+    else:
+        signal = np.where(confident, raw_signal, 0.0)
+    out["trade_signal"] = signal
+    out["strategy_ret_no_cost"] = out["trade_signal"] * out["future_ret"]
     return out
 
 
@@ -708,7 +748,11 @@ def main():
     regime_criterion = nn.CrossEntropyLoss()
     test_loader = DataLoader(test_ds, batch_size=args.batch_size, shuffle=False)
     test_metrics = evaluate(model, test_loader, criterion, regime_criterion, device)
-    pred_df = predictions_frame(test_metrics)
+    pred_df = predictions_frame(
+        test_metrics,
+        min_trade_prob=args.min_trade_prob,
+        trade_mode=args.trade_mode,
+    )
 
     y_true = pred_df["actual_label"].to_numpy()
     y_pred = pred_df["pred_label"].to_numpy()
@@ -748,6 +792,9 @@ def main():
         "hold": args.hold,
         "binary_threshold": args.binary_threshold,
         "window": args.window,
+        "trade_mode": args.trade_mode,
+        "min_trade_prob": args.min_trade_prob,
+        "use_class_weights": args.use_class_weights,
         "device": device,
         "rows": {
             "usable": int(len(usable)),
@@ -764,6 +811,9 @@ def main():
             "loss": test_metrics["loss"],
             "accuracy": test_metrics["acc"],
             "regime_accuracy": test_metrics["regime_acc"],
+            "trade_coverage": float((pred_df["trade_signal"] != 0).mean()),
+            "long_count": int((pred_df["trade_signal"] > 0).sum()),
+            "short_count": int((pred_df["trade_signal"] < 0).sum()),
             "strategy_mean_return_no_cost": float(pred_df["strategy_ret_no_cost"].mean()),
             "strategy_total_return_no_cost": float((1 + pred_df["strategy_ret_no_cost"]).prod() - 1),
         },
@@ -778,6 +828,11 @@ def main():
     print(f"Selected brute-force events: {len(selected_events)}")
     print(f"Test acc: {test_metrics['acc']:.4f}")
     print(f"Test regime acc: {test_metrics['regime_acc']:.4f}")
+    print(
+        f"Trade mode: {args.trade_mode} | min_prob={args.min_trade_prob:.2f} | "
+        f"coverage={summary['test']['trade_coverage']:.2%} | "
+        f"long={summary['test']['long_count']} | short={summary['test']['short_count']}"
+    )
     print(
         "Strategy return no cost: "
         f"mean={summary['test']['strategy_mean_return_no_cost']:.6f}, "
