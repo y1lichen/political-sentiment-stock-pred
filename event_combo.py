@@ -154,7 +154,17 @@ def set_seed(seed):
 
 def read_price_data(path, target):
     price_df = pd.read_csv(path)
-    price_df["Date"] = pd.to_datetime(price_df["Date"])
+    if "Date" in price_df.columns:
+        date_col = "Date"
+    elif "date" in price_df.columns:
+        date_col = "date"
+    elif "Unnamed: 0" in price_df.columns:
+        date_col = "Unnamed: 0"
+    else:
+        date_col = price_df.columns[0]
+    price_df = price_df.rename(columns={date_col: "Date"})
+    price_df["Date"] = pd.to_datetime(price_df["Date"], errors="coerce")
+    price_df = price_df.dropna(subset=["Date"])
     price_df = price_df.sort_values("Date").set_index("Date")
     if target not in price_df.columns:
         raise ValueError(f"Target {target!r} not found in {path}.")

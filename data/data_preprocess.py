@@ -18,13 +18,29 @@ def contains_any(text, words):
     return int(any(w in text for w in words))
 
 
+def normalize_date_column(df):
+    if "Date" in df.columns:
+        date_col = "Date"
+    elif "date" in df.columns:
+        date_col = "date"
+    elif "Unnamed: 0" in df.columns:
+        date_col = "Unnamed: 0"
+    else:
+        date_col = df.columns[0]
+
+    df = df.rename(columns={date_col: "Date"}).copy()
+    df["Date"] = pd.to_datetime(df["Date"], errors="coerce").dt.normalize()
+    df = df.dropna(subset=["Date"])
+    return df
+
+
 def load_trading_calendar(market):
     try:
         price_df = pd.read_csv(PRICE_FILE)
     except FileNotFoundError:
         return None
 
-    price_df["Date"] = pd.to_datetime(price_df["Date"]).dt.normalize()
+    price_df = normalize_date_column(price_df)
     candidates = ["^GSPC", "TSM"] if market == "us" else ["0050.TW", "2330.TW"]
     ticker = next((c for c in candidates if c in price_df.columns), None)
     if ticker is None:
