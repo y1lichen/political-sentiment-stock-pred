@@ -11,19 +11,32 @@ from sklearn.metrics import (
 )
 
 # === 設定檔 ===
-# 美股實驗:4 個美股標的 + 2330.TW 作為「同公司不同市場」對照 (TSM vs 2330.TW)。
-# event_combo.py 會依 target 後綴自動挑 _us / _tw 事件特徵與正確的市場專屬特徵集。
+# 台美股合併實驗: 4 個美股標的 + 11 個台股標的
+# event_combo.py 會依 target 格式自動挑選對應的市場特徵集
 TARGETS = [
-    "TSM",     # 台積電 ADR (對照 2330.TW)
+    # === 美股標的 ===
+    "TSM",     # 台積電 ADR
     "^SOX",    # 費城半導體
-    "^NDX",    # Nasdaq100
-    "^GSPC",   # S&P500
-    "2330.TW",  # 台積電本地掛牌 (頭條對照組)
+    "^NDX",    # Nasdaq 100
+    "^GSPC",   # S&P 500
+    
+    # === 台股標的 ===
+    "0050.TW",   # 台灣 50
+    "00632R.TW", # 台灣 50 反 1
+    "2303.TW",   # 聯電
+    "2308.TW",   # 台達電
+    "2317.TW",   # 鴻海
+    "2330.TW",   # 台積電
+    "2376.TW",   # 技嘉
+    "2377.TW",   # 微星
+    "2382.TW",   # 廣達
+    "2454.TW",   # 聯發科
+    "3711.TW",   # 日月光投控
 ]
 
 STRATEGY_NAME = "full_event_market_gated_mlp"
 BASELINE_STRATEGY_NAME = "market_only_gated_mlp"
-OUTPUT_CSV_NAME = "my_model_vs_baseline.csv"
+OUTPUT_CSV_NAME = "my_model_vs_baseline_all_markets.csv"
 
 # 你的 Gated MLP 啟動指令 (使用最好的設定)
 BASE_CMD = [
@@ -177,14 +190,15 @@ def main():
         ]
         
         df_results = pd.DataFrame(results)[columns_order]
+        # 為了視覺上好對齊，我們把美股和台股照名字排序
         df_results = df_results.sort_values(by='target')
         
         df_results.to_csv(OUTPUT_CSV_NAME, index=False)
-        print(f"\n🎉 評估完成！請查看報表: {OUTPUT_CSV_NAME}")
+        print(f"\n🎉 評估完成！請查看跨市場報表: {OUTPUT_CSV_NAME}")
         
         # 用 to_string() 避免 tabulate 報錯
         print("\n📊 你的模型表現 (依 CumRet 排序):")
-        print(df_results.sort_values(by='cumret', ascending=False)[['target', 'accuracy', 'sharpe', 'cumret', 'trades']].head(5).to_string(index=False))
+        print(df_results.sort_values(by='cumret', ascending=False)[['target', 'accuracy', 'd_accuracy', 'sharpe', 'cumret', 'd_cumret']].head(10).to_string(index=False))
     else:
         print("\n⚠️ 執行失敗，未產生結果。")
 
