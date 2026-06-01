@@ -1,5 +1,6 @@
 import os
 import subprocess
+import json
 import pandas as pd
 import numpy as np
 from sklearn.metrics import (
@@ -113,6 +114,8 @@ def calculate_metrics(target, full_pred_path, baseline_pred_path):
     """計算 full event+market model 與 market-only model baseline 的差異。"""
     full = prediction_metrics(full_pred_path)
     baseline = prediction_metrics(baseline_pred_path)
+    full_event_days = summary_event_days(os.path.join(os.path.dirname(full_pred_path), "summary.json"))
+    baseline_event_days = summary_event_days(os.path.join(os.path.dirname(baseline_pred_path), "summary.json"))
 
     return {
         "target": target,
@@ -142,7 +145,37 @@ def calculate_metrics(target, full_pred_path, baseline_pred_path):
         "baseline_sharpe": baseline["sharpe"],
         "baseline_cumret": baseline["cumret"],
         "baseline_trades": baseline["trades"],
+        "event_days": full_event_days["event_days"],
+        "event_coverage": full_event_days["event_coverage"],
+        "event_days_accuracy": full_event_days["accuracy"],
+        "d_event_days_accuracy": full_event_days["accuracy"] - baseline_event_days["accuracy"],
+        "event_days_cumret": full_event_days["strategy_total_return_no_cost"],
+        "d_event_days_cumret": (
+            full_event_days["strategy_total_return_no_cost"]
+            - baseline_event_days["strategy_total_return_no_cost"]
+        ),
+        "event_days_trades": full_event_days["trade_count"],
+        "d_event_days_trades": full_event_days["trade_count"] - baseline_event_days["trade_count"],
+        "baseline_event_days": baseline_event_days["event_days"],
+        "baseline_event_days_accuracy": baseline_event_days["accuracy"],
+        "baseline_event_days_cumret": baseline_event_days["strategy_total_return_no_cost"],
+        "baseline_event_days_trades": baseline_event_days["trade_count"],
     }
+
+
+def summary_event_days(summary_path):
+    defaults = {
+        "event_days": 0,
+        "event_coverage": 0.0,
+        "accuracy": 0.0,
+        "strategy_total_return_no_cost": 0.0,
+        "trade_count": 0,
+    }
+    if not os.path.exists(summary_path):
+        return defaults
+    with open(summary_path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    return {**defaults, **data.get("test_event_days", {})}
 
 def main():
     ensure_event_features()
@@ -201,7 +234,12 @@ def main():
             'sharpe', 'd_sharpe', 'cumret', 'd_cumret', 'trades', 'd_trades',
             'baseline_macro_f1', 'baseline_precision', 'baseline_recall',
             'baseline_accuracy', 'baseline_auc', 'baseline_sharpe',
-            'baseline_cumret', 'baseline_trades'
+            'baseline_cumret', 'baseline_trades',
+            'event_days', 'event_coverage', 'event_days_accuracy',
+            'd_event_days_accuracy', 'event_days_cumret', 'd_event_days_cumret',
+            'event_days_trades', 'd_event_days_trades', 'baseline_event_days',
+            'baseline_event_days_accuracy', 'baseline_event_days_cumret',
+            'baseline_event_days_trades'
         ]
         
         df_results = pd.DataFrame(results)[columns_order]

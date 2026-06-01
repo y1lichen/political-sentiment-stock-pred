@@ -769,6 +769,44 @@ def brute_force_events(combo_df, price, hold, min_n, min_abs_mean_ret, min_hit_r
     return selected_df["event"].tolist(), result_df, selected_df, selection_stats
 
 
+def add_signed_event_features(frame, selected_df):
+    out = frame.copy()
+    signed_cols = []
+    weighted_cols = []
+    if selected_df.empty:
+        out["event_any_selected"] = 0.0
+        out["event_rule_signal_sum"] = 0.0
+        out["event_rule_score_sum"] = 0.0
+        return out, signed_cols, weighted_cols, ["event_any_selected", "event_rule_signal_sum", "event_rule_score_sum"]
+
+    signal_sum = pd.Series(0.0, index=out.index)
+    score_sum = pd.Series(0.0, index=out.index)
+    any_selected = pd.Series(0.0, index=out.index)
+
+    for row in selected_df.itertuples(index=False):
+        event_col = row.event
+        if event_col not in out.columns:
+            continue
+        direction_sign = 1.0 if row.direction == "long" else -1.0
+        score = float(row.score)
+        signed_col = f"{event_col}__signed"
+        weighted_col = f"{event_col}__signed_score"
+        active = (out[event_col].fillna(0) > 0).astype(float)
+        out[signed_col] = active * direction_sign
+        out[weighted_col] = active * direction_sign * score
+        signed_cols.append(signed_col)
+        weighted_cols.append(weighted_col)
+        signal_sum = signal_sum + out[signed_col]
+        score_sum = score_sum + out[weighted_col]
+        any_selected = any_selected.mask(active > 0, 1.0)
+
+    aggregate_cols = ["event_any_selected", "event_rule_signal_sum", "event_rule_score_sum"]
+    out["event_any_selected"] = any_selected
+    out["event_rule_signal_sum"] = signal_sum
+    out["event_rule_score_sum"] = score_sum
+    return out, signed_cols, weighted_cols, aggregate_cols
+
+
 def add_institution_features(base, path, target):
     stock_id = target.split(".")[0]
     p = Path(path)
@@ -1336,6 +1374,38 @@ def strategy_metrics(pred_df):
     }
 
 
+def event_days_only_metrics(pred_df):
+    if "event_any_selected" not in pred_df.columns:
+        return {"event_days": 0, "event_coverage": 0.0}
+
+    event_df = pred_df[pred_df["event_any_selected"] > 0].copy()
+    if event_df.empty:
+        return {
+            "event_days": 0,
+            "event_coverage": 0.0,
+            "accuracy": 0.0,
+            "trade_accuracy": 0.0,
+            "trade_count": 0,
+            **strategy_metrics(event_df),
+        }
+
+    traded = event_df[event_df["trade_signal"] != 0]
+    if traded.empty:
+        trade_accuracy = 0.0
+    else:
+        trade_correct = np.sign(traded["trade_signal"]) == np.sign(traded["future_ret"])
+        trade_accuracy = float(trade_correct.mean())
+
+    return {
+        "event_days": int(len(event_df)),
+        "event_coverage": float(len(event_df) / max(len(pred_df), 1)),
+        "accuracy": float((event_df["actual_label"] == event_df["pred_label"]).mean()),
+        "trade_accuracy": trade_accuracy,
+        "trade_count": int(len(traded)),
+        **strategy_metrics(event_df),
+    }
+
+
 def tune_trade_threshold(metrics, trade_mode, fallback_threshold, min_coverage):
     rows = []
     for threshold in np.round(np.arange(0.0, 0.501, 0.025), 3):
@@ -1436,10 +1506,18 @@ def main():
         binary_threshold=args.binary_threshold,
         presidential_terms_only=args.presidential_terms_only,
     )
+    frame, signed_event_cols, weighted_event_cols, aggregate_event_cols = add_signed_event_features(
+        frame,
+        selected_df,
+    )
+    event_marker_cols = ["event_any_selected", "event_rule_signal_sum", "event_rule_score_sum"]
+    event_marker_frame = frame[event_marker_cols].copy()
 
     full_event_cols = selected_events + [
         c for c in frame.columns if "__x__regime_" in c
-    ] + [c for c in COUNT_EVENT_COLS if c in frame.columns]
+    ] + signed_event_cols + weighted_event_cols + aggregate_event_cols + [
+        c for c in COUNT_EVENT_COLS if c in frame.columns
+    ]
     full_event_cols = list(dict.fromkeys(full_event_cols))
 
     if args.feature_set == "market_only":
@@ -1525,6 +1603,13 @@ def main():
         trade_mode=args.trade_mode,
     )
 
+    val_target_dates = pd.to_datetime(val_metrics["dates"])
+    test_target_dates = pd.to_datetime(test_metrics["dates"])
+    for col in event_marker_cols:
+        marker = event_marker_frame[col]
+        val_pred_df[col] = marker.reindex(val_target_dates).fillna(0).reset_index(drop=True).to_numpy()
+        pred_df[col] = marker.reindex(test_target_dates).fillna(0).reset_index(drop=True).to_numpy()
+
     y_true = pred_df["actual_label"].to_numpy()
     y_pred = pred_df["pred_label"].to_numpy()
     report = classification_report(
@@ -1543,6 +1628,10 @@ def main():
     val_pred_df.to_csv(output_dir / "validation_predictions.csv", index=False)
     threshold_search_df.to_csv(output_dir / "validation_trade_threshold_search.csv", index=False)
     pred_df.to_csv(output_dir / "test_predictions.csv", index=False)
+    val_event_pred_df = val_pred_df[val_pred_df.get("event_any_selected", 0) > 0].copy()
+    test_event_pred_df = pred_df[pred_df.get("event_any_selected", 0) > 0].copy()
+    val_event_pred_df.to_csv(output_dir / "validation_event_days_predictions.csv", index=False)
+    test_event_pred_df.to_csv(output_dir / "test_event_days_predictions.csv", index=False)
     regime_stats = regime_conditioned_stats(usable, selected_events)
     regime_stats.to_csv(output_dir / "event_regime_conditioned_stats.csv", index=False)
 
@@ -1591,15 +1680,19 @@ def main():
             "market": len(market_cols),
             "event_regime": len(all_event_cols),
             "selected_events": len(selected_events),
+            "signed_events": len(signed_event_cols),
+            "weighted_signed_events": len(weighted_event_cols),
         },
         "event_selection": selection_stats,
         "validation_strategy": strategy_metrics(val_pred_df),
+        "validation_event_days": event_days_only_metrics(val_pred_df),
         "test": {
             "loss": test_metrics["loss"],
             "accuracy": test_metrics["acc"],
             "regime_accuracy": test_metrics["regime_acc"],
             **strategy_metrics(pred_df),
         },
+        "test_event_days": event_days_only_metrics(pred_df),
         "classification_report": report,
         "confusion_matrix_labels": [DIRECTION_LABELS[i] for i in DIRECTION_LABELS],
         "confusion_matrix": cm.tolist(),
@@ -1625,6 +1718,14 @@ def main():
         "Strategy return no cost: "
         f"mean={summary['test']['strategy_mean_return_no_cost']:.6f}, "
         f"total={summary['test']['strategy_total_return_no_cost']:.4f}"
+    )
+    print(
+        "Event-days only: "
+        f"days={summary['test_event_days']['event_days']} "
+        f"coverage={summary['test_event_days']['event_coverage']:.2%} "
+        f"acc={summary['test_event_days']['accuracy']:.4f} "
+        f"trades={summary['test_event_days']['trade_count']} "
+        f"total={summary['test_event_days']['strategy_total_return_no_cost']:.4f}"
     )
     print("Confusion matrix rows=true, cols=pred [down, up]:")
     print(cm)
