@@ -10,6 +10,7 @@ import pandas as pd
 import torch
 import torch.nn as nn
 from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
+from sklearn.metrics import f1_score, precision_score, recall_score, roc_auc_score
 from sklearn.preprocessing import StandardScaler
 from torch.utils.data import DataLoader, Dataset
 
@@ -1374,6 +1375,14 @@ def strategy_metrics(pred_df):
     }
 
 
+def sharpe_like(returns):
+    returns = pd.Series(returns).fillna(0.0)
+    std = returns.std(ddof=1)
+    if std == 0 or np.isnan(std):
+        return 0.0
+    return float(np.sqrt(252) * returns.mean() / std)
+
+
 def event_days_only_metrics(pred_df):
     if "event_any_selected" not in pred_df.columns:
         return {"event_days": 0, "event_coverage": 0.0}
@@ -1384,10 +1393,23 @@ def event_days_only_metrics(pred_df):
             "event_days": 0,
             "event_coverage": 0.0,
             "accuracy": 0.0,
+            "macro_f1": 0.0,
+            "precision": 0.0,
+            "recall": 0.0,
+            "auc": 0.5,
             "trade_accuracy": 0.0,
             "trade_count": 0,
+            "sharpe": 0.0,
             **strategy_metrics(event_df),
         }
+
+    actual = event_df["actual_label"].astype(int)
+    pred = event_df["pred_label"].astype(int)
+    prob_up = event_df["prob_up"].astype(float)
+    try:
+        auc = roc_auc_score(actual, prob_up)
+    except ValueError:
+        auc = 0.5
 
     traded = event_df[event_df["trade_signal"] != 0]
     if traded.empty:
@@ -1399,9 +1421,14 @@ def event_days_only_metrics(pred_df):
     return {
         "event_days": int(len(event_df)),
         "event_coverage": float(len(event_df) / max(len(pred_df), 1)),
-        "accuracy": float((event_df["actual_label"] == event_df["pred_label"]).mean()),
+        "accuracy": accuracy_score(actual, pred),
+        "macro_f1": f1_score(actual, pred, average="macro", zero_division=0),
+        "precision": precision_score(actual, pred, pos_label=1, zero_division=0),
+        "recall": recall_score(actual, pred, pos_label=1, zero_division=0),
+        "auc": float(auc),
         "trade_accuracy": trade_accuracy,
         "trade_count": int(len(traded)),
+        "sharpe": sharpe_like(event_df["strategy_ret_no_cost"]),
         **strategy_metrics(event_df),
     }
 

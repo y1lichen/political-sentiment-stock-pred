@@ -147,18 +147,38 @@ def calculate_metrics(target, full_pred_path, baseline_pred_path):
         "baseline_trades": baseline["trades"],
         "event_days": full_event_days["event_days"],
         "event_coverage": full_event_days["event_coverage"],
+        "event_days_macro_f1": full_event_days["macro_f1"],
+        "d_event_days_macro_f1": full_event_days["macro_f1"] - baseline_event_days["macro_f1"],
+        "event_days_precision": full_event_days["precision"],
+        "d_event_days_precision": full_event_days["precision"] - baseline_event_days["precision"],
+        "event_days_recall": full_event_days["recall"],
+        "d_event_days_recall": full_event_days["recall"] - baseline_event_days["recall"],
         "event_days_accuracy": full_event_days["accuracy"],
         "d_event_days_accuracy": full_event_days["accuracy"] - baseline_event_days["accuracy"],
+        "event_days_auc": full_event_days["auc"],
+        "d_event_days_auc": full_event_days["auc"] - baseline_event_days["auc"],
+        "event_days_sharpe": full_event_days["sharpe"],
+        "d_event_days_sharpe": full_event_days["sharpe"] - baseline_event_days["sharpe"],
         "event_days_cumret": full_event_days["strategy_total_return_no_cost"],
         "d_event_days_cumret": (
             full_event_days["strategy_total_return_no_cost"]
             - baseline_event_days["strategy_total_return_no_cost"]
         ),
+        "event_days_trade_accuracy": full_event_days["trade_accuracy"],
+        "d_event_days_trade_accuracy": (
+            full_event_days["trade_accuracy"] - baseline_event_days["trade_accuracy"]
+        ),
         "event_days_trades": full_event_days["trade_count"],
         "d_event_days_trades": full_event_days["trade_count"] - baseline_event_days["trade_count"],
         "baseline_event_days": baseline_event_days["event_days"],
+        "baseline_event_days_macro_f1": baseline_event_days["macro_f1"],
+        "baseline_event_days_precision": baseline_event_days["precision"],
+        "baseline_event_days_recall": baseline_event_days["recall"],
         "baseline_event_days_accuracy": baseline_event_days["accuracy"],
+        "baseline_event_days_auc": baseline_event_days["auc"],
+        "baseline_event_days_sharpe": baseline_event_days["sharpe"],
         "baseline_event_days_cumret": baseline_event_days["strategy_total_return_no_cost"],
+        "baseline_event_days_trade_accuracy": baseline_event_days["trade_accuracy"],
         "baseline_event_days_trades": baseline_event_days["trade_count"],
     }
 
@@ -167,8 +187,14 @@ def summary_event_days(summary_path):
     defaults = {
         "event_days": 0,
         "event_coverage": 0.0,
+        "macro_f1": 0.0,
+        "precision": 0.0,
+        "recall": 0.0,
         "accuracy": 0.0,
+        "auc": 0.5,
+        "sharpe": 0.0,
         "strategy_total_return_no_cost": 0.0,
+        "trade_accuracy": 0.0,
         "trade_count": 0,
     }
     if not os.path.exists(summary_path):
@@ -235,11 +261,21 @@ def main():
             'baseline_macro_f1', 'baseline_precision', 'baseline_recall',
             'baseline_accuracy', 'baseline_auc', 'baseline_sharpe',
             'baseline_cumret', 'baseline_trades',
-            'event_days', 'event_coverage', 'event_days_accuracy',
-            'd_event_days_accuracy', 'event_days_cumret', 'd_event_days_cumret',
-            'event_days_trades', 'd_event_days_trades', 'baseline_event_days',
-            'baseline_event_days_accuracy', 'baseline_event_days_cumret',
-            'baseline_event_days_trades'
+            'event_days', 'event_coverage',
+            'event_days_macro_f1', 'd_event_days_macro_f1',
+            'event_days_precision', 'd_event_days_precision',
+            'event_days_recall', 'd_event_days_recall',
+            'event_days_accuracy', 'd_event_days_accuracy',
+            'event_days_auc', 'd_event_days_auc',
+            'event_days_sharpe', 'd_event_days_sharpe',
+            'event_days_cumret', 'd_event_days_cumret',
+            'event_days_trade_accuracy', 'd_event_days_trade_accuracy',
+            'event_days_trades', 'd_event_days_trades',
+            'baseline_event_days', 'baseline_event_days_macro_f1',
+            'baseline_event_days_precision', 'baseline_event_days_recall',
+            'baseline_event_days_accuracy', 'baseline_event_days_auc',
+            'baseline_event_days_sharpe', 'baseline_event_days_cumret',
+            'baseline_event_days_trade_accuracy', 'baseline_event_days_trades'
         ]
         
         df_results = pd.DataFrame(results)[columns_order]
