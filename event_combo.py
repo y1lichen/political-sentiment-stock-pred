@@ -15,7 +15,7 @@ from torch.utils.data import DataLoader, Dataset
 
 
 PRICE_PATH = "data/taiwan_market_data/global_prices.csv"
-EVENT_PATH = "data/output/trump_daily_binary_event_features.csv"
+# 事件特徵改成 per-market;由 event_path_for_target() 依 --target 挑 _us / _tw 那份。
 INSTITUTION_PATH = "data/taiwan_market_data/institutional_investors.csv"
 MARGIN_PATH = "data/taiwan_market_data/margin_trading.csv"
 FUTURES_NIGHT_PATH = "data/taiwan_market_data/tx_futures_night.csv"
@@ -158,10 +158,26 @@ def read_price_data(path, target):
     return price_df
 
 
+def event_path_for_target(target):
+    """依標的所在市場挑事件特徵 CSV:台股 (.TW) 用台北時區那份,其餘 (美股) 用美東那份。"""
+    suffix = "tw" if target.endswith(".TW") else "us"
+    return f"data/output/trump_daily_binary_event_features_{suffix}.csv"
+
+
 def read_event_data(path):
     event_df = pd.read_csv(path)
     event_df["trump_date"] = pd.to_datetime(event_df["trump_date"])
     return event_df.sort_values("trump_date").set_index("trump_date")
+
+
+def real_price_series(price_df, target):
+    """去掉 forward-fill 的假日列 (與前一交易日收盤完全相同, diff == 0)。
+
+    統一日曆對非交易日做了 ffill,會造成假的 0 報酬,且其前一日的 future_ret 會指向
+    stale 價而把 direction_label 標錯。首列 diff 為 NaN 視為真實交易日保留。
+    """
+    price = price_df[target].dropna()
+    return price[price.diff().fillna(1) != 0]
 
 
 def presidential_term_segment(index):
@@ -337,6 +353,10 @@ def make_market_features(price_df, target):
     out["target_drawdown_60"] = price / rolling_high - 1
 
     for col in ["TSM", "^SOX", "^NDX", "^GSPC", "TWD=X"]:
+        # 修改 #1:標的本身就是領先指標之一時跳過,避免產生與 target_ret_* 完全重複、
+        # 且語意錯亂 (「領先指標」變「標的自我特徵」) 的欄位。
+        if col == target:
+            continue
         if col in price_df.columns:
             out[f"{col}_ret_1d"] = price_df[col].pct_change()
             out[f"{col}_ret_5d"] = price_df[col].pct_change(5)
@@ -353,9 +373,13 @@ def make_market_features(price_df, target):
     if "^TNX" in price_df.columns:
         out["tnx_diff_1d"] = price_df["^TNX"].diff()
 
-    out = add_institution_features(out, INSTITUTION_PATH, target)
-    out = add_margin_features(out, MARGIN_PATH, target)
-    out = add_futures_night_features(out, FUTURES_NIGHT_PATH)
+    # 修改 #2:台股專屬特徵 (三大法人 / 融資融券 / 台指期夜盤) 只在台股標的時才加。
+    # 法人/融資對美股本來就會自動 no-op (stock_id 對不上),但 add_futures_night_features
+    # 不看 target、永遠加台指期夜盤 → 會把台指期硬塞給美股標的。改成條件式讓特徵集誠實。
+    if target.endswith(".TW"):
+        out = add_institution_features(out, INSTITUTION_PATH, target)
+        out = add_margin_features(out, MARGIN_PATH, target)
+        out = add_futures_night_features(out, FUTURES_NIGHT_PATH)
     return out
 
 
@@ -418,9 +442,11 @@ def build_model_frame(
     frame = add_regime_features(frame)
     frame = add_event_regime_interactions(frame, selected_events)
 
-    price = price_df[target].dropna()
+    # 修改 #3:用去 stale 後的價格序列算 future_ret,shift(-hold) 才會指向下一個「真正
+    # 有交易」的收盤;stale (ffill) 日不在此序列 → future_ret 為 NaN,下方 dropna 會剔除。
+    price = real_price_series(price_df, target)
     future_ret = price.shift(-hold) / price - 1
-    frame["future_ret"] = future_ret
+    frame["future_ret"] = future_ret.reindex(frame.index)
     frame["direction_label"] = (frame["future_ret"] > binary_threshold).astype(int)
 
     frame = frame.replace([np.inf, -np.inf], np.nan).sort_index()
@@ -868,11 +894,14 @@ def main():
     output_dir.mkdir(parents=True, exist_ok=True)
 
     price_df = read_price_data(PRICE_PATH, args.target)
-    event_df = read_event_data(EVENT_PATH)
+    event_path = event_path_for_target(args.target)
+    event_df = read_event_data(event_path)
+    print(f"Event features: {event_path}")
     if args.presidential_terms_only:
         event_segment = presidential_term_segment(event_df.index)
         event_df = event_df.loc[event_segment > 0].copy()
-    price = price_df[args.target].dropna()
+    # 用去 stale 後的價格選事件,避免假日的假 0 報酬汙染 brute-force 篩選。
+    price = real_price_series(price_df, args.target)
     combo_df, base_event_cols = make_event_combos(event_df)
     selected_events, brute_df, selected_df = brute_force_events(
         combo_df=combo_df,

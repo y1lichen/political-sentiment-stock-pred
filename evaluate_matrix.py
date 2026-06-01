@@ -11,19 +11,14 @@ from sklearn.metrics import (
 )
 
 # === 設定檔 ===
-# 根據同學的 LEGACY_TARGETS
+# 美股實驗:4 個美股標的 + 2330.TW 作為「同公司不同市場」對照 (TSM vs 2330.TW)。
+# event_combo.py 會依 target 後綴自動挑 _us / _tw 事件特徵與正確的市場專屬特徵集。
 TARGETS = [
-    "0050.TW",
-    "00632R.TW",
-    "2303.TW",
-    "2308.TW",
-    "2317.TW",
-    "2330.TW",
-    "2376.TW",
-    "2377.TW",
-    "2382.TW",
-    "2454.TW",
-    "3711.TW",
+    "TSM",     # 台積電 ADR (對照 2330.TW)
+    "^SOX",    # 費城半導體
+    "^NDX",    # Nasdaq100
+    "^GSPC",   # S&P500
+    "2330.TW",  # 台積電本地掛牌 (頭條對照組)
 ]
 
 STRATEGY_NAME = "full_event_market_gated_mlp"
