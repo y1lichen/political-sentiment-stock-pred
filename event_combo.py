@@ -162,13 +162,13 @@ def read_price_data(path, target):
 
 
 def event_path_for_target(target):
-    """依標的所在市場挑事件特徵 CSV, 若分市場檔不存在則回退到共用事件檔。"""
+    """依標的所在市場挑 post-level 事件特徵 CSV, 若分市場檔不存在則回退到共用事件檔。"""
     suffix = "tw" if target.endswith(".TW") else "us"
-    market_path = Path(f"data/output/trump_daily_binary_event_features_{suffix}.csv")
+    market_path = Path(f"data/output/trump_posts_with_event_features_{suffix}.csv")
     if market_path.exists():
         return str(market_path)
 
-    fallback_path = Path("data/output/trump_daily_binary_event_features.csv")
+    fallback_path = Path("data/output/trump_posts_with_event_features.csv")
     if fallback_path.exists():
         print(
             f"Warning: {market_path} not found; using fallback event features: {fallback_path}"
@@ -176,15 +176,16 @@ def event_path_for_target(target):
         return str(fallback_path)
 
     raise FileNotFoundError(
-        "No Trump daily event feature file found. Expected either "
+        "No Trump post-level event feature file found. Expected either "
         f"{market_path} or {fallback_path}. Run `python data/data_preprocess.py` first."
     )
 
 
 def read_event_data(path):
-    event_df = pd.read_csv(path)
-    event_df["trump_date"] = pd.to_datetime(event_df["trump_date"])
-    return event_df.sort_values("trump_date").set_index("trump_date")
+    post_df = pd.read_csv(path)
+    post_df["Timestamp"] = pd.to_datetime(post_df["Timestamp"], utc=True, errors="coerce")
+    post_df = post_df.dropna(subset=["Timestamp"])
+    return post_df.sort_values("Timestamp").reset_index(drop=True)
 
 
 def real_price_series(price_df, target):
@@ -195,6 +196,179 @@ def real_price_series(price_df, target):
     """
     price = price_df[target].dropna()
     return price[price.diff().fillna(1) != 0]
+
+
+def market_timezone(ticker):
+    return "Asia/Taipei" if ticker.endswith(".TW") else "America/New_York"
+
+
+def market_close_available_at(dates, ticker):
+    dates = pd.to_datetime(dates).normalize()
+    tz = market_timezone(ticker)
+    if ticker.endswith(".TW"):
+        offset = pd.Timedelta(hours=14)
+    else:
+        offset = pd.Timedelta(hours=16, minutes=30)
+    local_time = pd.DatetimeIndex(dates).tz_localize(tz) + offset
+    return pd.Series(local_time.tz_convert("UTC"), index=dates)
+
+
+def next_morning_available_at(dates, ticker):
+    dates = pd.to_datetime(dates).normalize()
+    tz = market_timezone(ticker)
+    local_time = pd.DatetimeIndex(dates + pd.Timedelta(days=1)).tz_localize(tz) + pd.Timedelta(hours=9)
+    return pd.Series(local_time.tz_convert("UTC"), index=dates)
+
+
+def same_morning_available_at(dates, ticker):
+    dates = pd.to_datetime(dates).normalize()
+    tz = market_timezone(ticker)
+    local_time = pd.DatetimeIndex(dates).tz_localize(tz) + pd.Timedelta(hours=9)
+    return pd.Series(local_time.tz_convert("UTC"), index=dates)
+
+
+def decision_times_for_samples(sample_dates, target):
+    # close-to-next-close: decide after the target market close on sample date D.
+    return market_close_available_at(sample_dates, target)
+
+
+def asof_join_features(sample_dates, decision_times, source_df, feature_cols):
+    if source_df is None or source_df.empty or not feature_cols:
+        return pd.DataFrame(index=sample_dates)
+
+    right = source_df[["available_at"] + feature_cols].copy()
+    right = right.dropna(subset=["available_at"]).sort_values("available_at")
+    if right.empty:
+        return pd.DataFrame(index=sample_dates)
+
+    left = pd.DataFrame(
+        {
+            "sample_date": pd.to_datetime(sample_dates),
+            "decision_time": pd.Series(decision_times, index=sample_dates).to_numpy(),
+        }
+    ).sort_values("decision_time")
+
+    merged = pd.merge_asof(
+        left,
+        right,
+        left_on="decision_time",
+        right_on="available_at",
+        direction="backward",
+    )
+    merged = merged.set_index("sample_date")
+    return merged[feature_cols].reindex(pd.to_datetime(sample_dates))
+
+
+def price_feature_source(price_df, ticker, prefix, feature_kind):
+    price = real_price_series(price_df, ticker)
+    out = pd.DataFrame(index=price.index)
+
+    if feature_kind == "target":
+        out[f"{prefix}_ret_1d"] = price.pct_change()
+        out[f"{prefix}_ret_3d"] = price.pct_change(3)
+        out[f"{prefix}_ret_5d"] = price.pct_change(5)
+        out[f"{prefix}_ret_10d"] = price.pct_change(10)
+        out[f"{prefix}_vol_10d"] = out[f"{prefix}_ret_1d"].rolling(10).std()
+        out[f"{prefix}_vol_20d"] = out[f"{prefix}_ret_1d"].rolling(20).std()
+        out[f"{prefix}_ma_gap_5"] = price / price.rolling(5).mean() - 1
+        out[f"{prefix}_ma_gap_20"] = price / price.rolling(20).mean() - 1
+        out[f"{prefix}_ma_gap_60"] = price / price.rolling(60).mean() - 1
+        rolling_high = price.rolling(60, min_periods=20).max()
+        out[f"{prefix}_drawdown_60"] = price / rolling_high - 1
+    elif feature_kind == "lead":
+        out[f"{ticker}_ret_1d"] = price.pct_change()
+        out[f"{ticker}_ret_5d"] = price.pct_change(5)
+    elif feature_kind == "vix":
+        out["vix_level"] = price
+        out["vix_diff_1d"] = price.diff()
+        out["vix_pct_chg"] = price.pct_change()
+        out["vix_z20"] = (price - price.rolling(20).mean()) / price.rolling(20).std()
+        out["vix_low"] = (price < price.rolling(252, min_periods=60).quantile(0.35)).astype(float)
+        out["vix_high"] = (price > price.rolling(252, min_periods=60).quantile(0.75)).astype(float)
+    elif feature_kind == "tnx":
+        out["tnx_diff_1d"] = price.diff()
+
+    out["available_at"] = market_close_available_at(out.index, ticker).to_numpy()
+    return out
+
+
+def institution_feature_source(path, target):
+    stock_id = target.split(".")[0]
+    p = Path(path)
+    if not p.exists():
+        return pd.DataFrame()
+
+    inst = pd.read_csv(p)
+    inst = inst[inst["stock_id"].astype(str) == stock_id].copy()
+    if inst.empty:
+        return pd.DataFrame()
+
+    inst["date"] = pd.to_datetime(inst["date"])
+    inst["net_buy"] = inst["buy"] - inst["sell"]
+    wide = inst.pivot_table(index="date", columns="name", values="net_buy", aggfunc="sum")
+    wide = wide.add_prefix("inst_net_")
+    wide["inst_net_total"] = wide.sum(axis=1)
+    wide["available_at"] = next_morning_available_at(wide.index, target).to_numpy()
+    return wide
+
+
+def margin_feature_source(path, target):
+    stock_id = target.split(".")[0]
+    p = Path(path)
+    if not p.exists():
+        return pd.DataFrame()
+
+    margin = pd.read_csv(p)
+    margin = margin[margin["stock_id"].astype(str) == stock_id].copy()
+    if margin.empty:
+        return pd.DataFrame()
+
+    margin["date"] = pd.to_datetime(margin["date"])
+    margin = margin.set_index("date").sort_index()
+    cols = [
+        "MarginPurchaseTodayBalance",
+        "ShortSaleTodayBalance",
+        "MarginPurchaseBuy",
+        "MarginPurchaseSell",
+        "ShortSaleBuy",
+        "ShortSaleSell",
+    ]
+    cols = [c for c in cols if c in margin.columns]
+    if not cols:
+        return pd.DataFrame()
+    out = margin[cols].add_prefix("margin_")
+    if "margin_MarginPurchaseTodayBalance" in out.columns:
+        out["margin_balance_chg"] = out["margin_MarginPurchaseTodayBalance"].pct_change()
+    if "margin_ShortSaleTodayBalance" in out.columns:
+        out["short_balance_chg"] = out["margin_ShortSaleTodayBalance"].pct_change()
+    out["available_at"] = next_morning_available_at(out.index, target).to_numpy()
+    return out
+
+
+def futures_night_feature_source(path, target=None):
+    p = Path(path)
+    if not p.exists():
+        return pd.DataFrame()
+
+    futures = pd.read_csv(p)
+    if target is not None and "stock_id" in futures.columns:
+        futures = futures[futures["stock_id"].astype(str) == target].copy()
+    if futures.empty:
+        return pd.DataFrame()
+
+    futures["date"] = pd.to_datetime(futures["date"])
+    futures = futures.sort_values("date").set_index("date")
+    cols = [c for c in ["spread", "spread_per", "volume"] if c in futures.columns]
+    if not cols:
+        return pd.DataFrame()
+
+    out = futures[cols].add_prefix("tx_night_")
+    if "tx_night_volume" in out.columns:
+        out["tx_night_volume_z20"] = (
+            out["tx_night_volume"] - out["tx_night_volume"].rolling(20).mean()
+        ) / out["tx_night_volume"].rolling(20).std()
+    out["available_at"] = same_morning_available_at(out.index, target or "2330.TW").to_numpy()
+    return out
 
 
 def presidential_term_segment(index):
@@ -222,6 +396,216 @@ def binary_event_columns(event_df):
         if len(values) > 0 and set(values).issubset({0, 1, 0.0, 1.0}):
             cols.append(col)
     return cols
+
+
+def aggregate_posts_for_decisions(post_df, sample_dates, decision_times):
+    sample_dates = pd.to_datetime(sample_dates)
+    decision_times = pd.Series(decision_times, index=sample_dates).sort_index()
+    out_index = decision_times.index
+
+    daily = pd.DataFrame(index=out_index)
+    base_count_cols = [
+        "post_count",
+        "tariff_count",
+        "deal_count",
+        "relief_count",
+        "action_count",
+        "attack_count",
+        "positive_count",
+        "market_brag_count",
+        "china_count",
+        "taiwan_count",
+        "chips_count",
+        "ai_count",
+        "iran_count",
+        "russia_count",
+        "night_post_count",
+        "pre_post_count",
+        "open_post_count",
+        "total_excl",
+        "total_caps",
+        "total_alpha",
+        "avg_post_len",
+        "sig_djt_count",
+        "sig_potus_count",
+        "sig_tyfa_count",
+        "pre_tariff_count",
+        "pre_deal_count",
+        "pre_relief_count",
+        "pre_action_count",
+        "open_tariff_count",
+        "open_deal_count",
+    ]
+    for col in base_count_cols:
+        daily[col] = 0.0
+
+    if post_df.empty or len(decision_times) == 0:
+        return binary_features_from_interval_counts(daily)
+
+    post_times = post_df["Timestamp"].sort_values()
+    decision_ns = decision_times.to_numpy(dtype="datetime64[ns]")
+    post_ns = post_times.to_numpy(dtype="datetime64[ns]")
+    positions = np.searchsorted(decision_ns, post_ns, side="left")
+    valid = positions < len(decision_times)
+    if not valid.any():
+        return binary_features_from_interval_counts(daily)
+
+    assigned = post_df.loc[post_times.index[valid]].copy()
+    assigned["sample_date"] = decision_times.index.to_numpy()[positions[valid]]
+
+    required = [
+        "ev_tariff",
+        "ev_deal",
+        "ev_relief",
+        "ev_action",
+        "ev_attack",
+        "ev_positive",
+        "ev_market_brag",
+        "ev_china",
+        "ev_taiwan",
+        "ev_chips",
+        "ev_ai",
+        "ev_iran",
+        "ev_russia",
+        "is_night_post",
+        "is_pre_market_post",
+        "is_market_open_post",
+        "exclamation_count",
+        "caps_count",
+        "alpha_count",
+        "post_len",
+        "sig_djt",
+        "sig_potus",
+        "sig_tyfa",
+    ]
+    for col in required:
+        if col not in assigned.columns:
+            assigned[col] = 0
+
+    grouped = assigned.groupby("sample_date")
+    daily["post_count"] = grouped.size().reindex(out_index, fill_value=0).astype(float)
+    mappings = {
+        "tariff_count": "ev_tariff",
+        "deal_count": "ev_deal",
+        "relief_count": "ev_relief",
+        "action_count": "ev_action",
+        "attack_count": "ev_attack",
+        "positive_count": "ev_positive",
+        "market_brag_count": "ev_market_brag",
+        "china_count": "ev_china",
+        "taiwan_count": "ev_taiwan",
+        "chips_count": "ev_chips",
+        "ai_count": "ev_ai",
+        "iran_count": "ev_iran",
+        "russia_count": "ev_russia",
+        "night_post_count": "is_night_post",
+        "pre_post_count": "is_pre_market_post",
+        "open_post_count": "is_market_open_post",
+        "total_excl": "exclamation_count",
+        "total_caps": "caps_count",
+        "total_alpha": "alpha_count",
+        "sig_djt_count": "sig_djt",
+        "sig_potus_count": "sig_potus",
+        "sig_tyfa_count": "sig_tyfa",
+    }
+    for out_col, src_col in mappings.items():
+        daily[out_col] = grouped[src_col].sum().reindex(out_index, fill_value=0).astype(float)
+    daily["avg_post_len"] = grouped["post_len"].mean().reindex(out_index, fill_value=0).astype(float)
+
+    special = grouped.apply(lambda g: pd.Series({
+        "pre_tariff_count": ((g["is_pre_market_post"] == 1) & (g["ev_tariff"] == 1)).sum(),
+        "pre_deal_count": ((g["is_pre_market_post"] == 1) & (g["ev_deal"] == 1)).sum(),
+        "pre_relief_count": ((g["is_pre_market_post"] == 1) & (g["ev_relief"] == 1)).sum(),
+        "pre_action_count": ((g["is_pre_market_post"] == 1) & (g["ev_action"] == 1)).sum(),
+        "open_tariff_count": ((g["is_market_open_post"] == 1) & (g["ev_tariff"] == 1)).sum(),
+        "open_deal_count": ((g["is_market_open_post"] == 1) & (g["ev_deal"] == 1)).sum(),
+    }))
+    for col in special.columns:
+        daily[col] = special[col].reindex(out_index, fill_value=0).astype(float)
+
+    return binary_features_from_interval_counts(daily)
+
+
+def binary_features_from_interval_counts(daily):
+    out = pd.DataFrame(index=daily.index)
+
+    out["post_count"] = daily["post_count"]
+    out["tariff_count"] = daily["tariff_count"]
+    out["deal_count"] = daily["deal_count"]
+    out["relief_count"] = daily["relief_count"]
+    out["china_count"] = daily["china_count"]
+    out["taiwan_count"] = daily["taiwan_count"]
+    out["chips_count"] = daily["chips_count"]
+    out["ai_count"] = daily["ai_count"]
+    out["night_post_count"] = daily["night_post_count"]
+    out["pre_post_count"] = daily["pre_post_count"]
+    out["open_post_count"] = daily["open_post_count"]
+    out["total_excl"] = daily["total_excl"]
+    out["avg_post_len"] = daily["avg_post_len"]
+
+    out["posts_high"] = (daily["post_count"] >= 20).astype(int)
+    out["posts_low"] = (daily["post_count"] <= 5).astype(int)
+    out["posts_very_high"] = (daily["post_count"] >= 35).astype(int)
+    out["silence_day"] = (daily["post_count"] == 0).astype(int)
+    out["has_tariff"] = (daily["tariff_count"] >= 1).astype(int)
+    out["tariff_heavy"] = (daily["tariff_count"] >= 3).astype(int)
+    out["has_deal"] = (daily["deal_count"] >= 1).astype(int)
+    out["deal_heavy"] = (daily["deal_count"] >= 2).astype(int)
+    out["has_relief"] = (daily["relief_count"] >= 1).astype(int)
+    out["has_action"] = (daily["action_count"] >= 1).astype(int)
+    out["has_attack"] = (daily["attack_count"] >= 1).astype(int)
+    out["attack_heavy"] = (daily["attack_count"] >= 3).astype(int)
+    out["has_positive"] = (daily["positive_count"] >= 1).astype(int)
+    out["positive_heavy"] = (daily["positive_count"] >= 3).astype(int)
+    out["has_market_brag"] = (daily["market_brag_count"] >= 1).astype(int)
+    out["brag_heavy"] = (daily["market_brag_count"] >= 2).astype(int)
+    out["has_china"] = (daily["china_count"] >= 1).astype(int)
+    out["has_iran"] = (daily["iran_count"] >= 1).astype(int)
+    out["has_russia"] = (daily["russia_count"] >= 1).astype(int)
+    out["pre_tariff"] = (daily["pre_tariff_count"] >= 1).astype(int)
+    out["pre_deal"] = (daily["pre_deal_count"] >= 1).astype(int)
+    out["pre_relief"] = (daily["pre_relief_count"] >= 1).astype(int)
+    out["pre_action"] = (daily["pre_action_count"] >= 1).astype(int)
+    out["open_tariff"] = (daily["open_tariff_count"] >= 1).astype(int)
+    out["open_tariff_heavy"] = (daily["open_tariff_count"] >= 2).astype(int)
+    out["open_deal"] = (daily["open_deal_count"] >= 1).astype(int)
+    out["has_night_post"] = (daily["night_post_count"] >= 1).astype(int)
+    out["sig_djt"] = (daily["sig_djt_count"] >= 1).astype(int)
+    out["sig_potus"] = (daily["sig_potus_count"] >= 1).astype(int)
+    out["sig_tyfa"] = (daily["sig_tyfa_count"] >= 1).astype(int)
+
+    caps_ratio = daily["total_caps"] / daily["total_alpha"].replace(0, np.nan)
+    out["high_emotion"] = (caps_ratio.fillna(0) > 0.2).astype(int)
+    out["lots_of_excl"] = (daily["total_excl"] >= 5).astype(int)
+    out["long_posts"] = (daily["avg_post_len"] > 400).astype(int)
+    out["short_posts"] = ((daily["avg_post_len"] < 150) & (daily["post_count"] > 0)).astype(int)
+    out["deal_over_tariff"] = (
+        (daily["deal_count"] > daily["tariff_count"]) & (daily["deal_count"] >= 1)
+    ).astype(int)
+    out["tariff_only"] = ((daily["tariff_count"] >= 1) & (daily["deal_count"] == 0)).astype(int)
+    out["deal_only"] = ((daily["deal_count"] >= 1) & (daily["tariff_count"] == 0)).astype(int)
+    out["has_taiwan"] = (daily["taiwan_count"] >= 1).astype(int)
+    out["has_chips"] = (daily["chips_count"] >= 1).astype(int)
+    out["chips_heavy"] = (daily["chips_count"] >= 2).astype(int)
+    out["has_ai"] = (daily["ai_count"] >= 1).astype(int)
+    out["china_taiwan_combo"] = ((daily["china_count"] >= 1) & (daily["taiwan_count"] >= 1)).astype(int)
+    out["china_chips_combo"] = ((daily["china_count"] >= 1) & (daily["chips_count"] >= 1)).astype(int)
+    out["taiwan_chips_combo"] = ((daily["taiwan_count"] >= 1) & (daily["chips_count"] >= 1)).astype(int)
+
+    tariff_active = (daily["tariff_count"] >= 1).astype(int)
+    china_active = (daily["china_count"] >= 1).astype(int)
+    chips_active = (daily["chips_count"] >= 1).astype(int)
+    out["tariff_streak_3d"] = (tariff_active.shift(1).rolling(3, min_periods=3).sum() >= 3).fillna(False).astype(int)
+    out["tariff_rising"] = (
+        (tariff_active.shift(1).rolling(3, min_periods=3).sum() >= 2)
+        & (daily["tariff_count"] >= 1)
+    ).fillna(False).astype(int)
+    out["china_streak_3d"] = (china_active.shift(1).rolling(3, min_periods=3).sum() >= 3).fillna(False).astype(int)
+    out["chips_streak_3d"] = (chips_active.shift(1).rolling(3, min_periods=3).sum() >= 3).fillna(False).astype(int)
+    prev_7_post_avg = daily["post_count"].shift(1).rolling(7, min_periods=3).mean()
+    out["volume_spike"] = (daily["post_count"] > prev_7_post_avg * 2).fillna(False).astype(int)
+    out["volume_drop"] = (daily["post_count"] < prev_7_post_avg * 0.4).fillna(False).astype(int)
+    return out
 
 
 def make_event_combos(event_df, max_combo_size=2):
@@ -363,19 +747,19 @@ def add_futures_night_features(base, path, target=None):
 
 
 def make_market_features(price_df, target):
-    price = price_df[target].dropna()
-    out = pd.DataFrame(index=price_df.index)
-    out["target_ret_1d"] = price.pct_change()
-    out["target_ret_3d"] = price.pct_change(3)
-    out["target_ret_5d"] = price.pct_change(5)
-    out["target_ret_10d"] = price.pct_change(10)
-    out["target_vol_10d"] = out["target_ret_1d"].rolling(10).std()
-    out["target_vol_20d"] = out["target_ret_1d"].rolling(20).std()
-    out["target_ma_gap_5"] = price / price.rolling(5).mean() - 1
-    out["target_ma_gap_20"] = price / price.rolling(20).mean() - 1
-    out["target_ma_gap_60"] = price / price.rolling(60).mean() - 1
-    rolling_high = price.rolling(60, min_periods=20).max()
-    out["target_drawdown_60"] = price / rolling_high - 1
+    sample_dates = real_price_series(price_df, target).index
+    decision_times = decision_times_for_samples(sample_dates, target)
+    out = pd.DataFrame(index=sample_dates)
+
+    def add_source(source):
+        nonlocal out
+        if source is None or source.empty:
+            return
+        feature_cols = [c for c in source.columns if c != "available_at"]
+        aligned = asof_join_features(sample_dates, decision_times, source, feature_cols)
+        out = out.join(aligned, how="left")
+
+    add_source(price_feature_source(price_df, target, "target", "target"))
 
     for col in ["TSM", "^SOX", "^NDX", "^GSPC", "TWD=X"]:
         # 修改 #1:標的本身就是領先指標之一時跳過,避免產生與 target_ret_* 完全重複、
@@ -383,33 +767,26 @@ def make_market_features(price_df, target):
         if col == target:
             continue
         if col in price_df.columns:
-            out[f"{col}_ret_1d"] = price_df[col].pct_change()
-            out[f"{col}_ret_5d"] = price_df[col].pct_change(5)
+            add_source(price_feature_source(price_df, col, col, "lead"))
 
     if "^VIX" in price_df.columns:
-        vix = price_df["^VIX"]
-        out["vix_level"] = vix
-        out["vix_diff_1d"] = vix.diff()
-        out["vix_pct_chg"] = vix.pct_change()
-        out["vix_z20"] = (vix - vix.rolling(20).mean()) / vix.rolling(20).std()
-        out["vix_low"] = (vix < vix.rolling(252, min_periods=60).quantile(0.35)).astype(float)
-        out["vix_high"] = (vix > vix.rolling(252, min_periods=60).quantile(0.75)).astype(float)
+        add_source(price_feature_source(price_df, "^VIX", "vix", "vix"))
 
     if "^TNX" in price_df.columns:
-        out["tnx_diff_1d"] = price_df["^TNX"].diff()
+        add_source(price_feature_source(price_df, "^TNX", "tnx", "tnx"))
 
     if target.endswith(".TW"):
-        out = add_institution_features(out, INSTITUTION_PATH, target)
-        out = add_margin_features(out, MARGIN_PATH, target)
-        out = add_futures_night_features(out, FUTURES_NIGHT_PATH)
+        add_source(institution_feature_source(INSTITUTION_PATH, target))
+        add_source(margin_feature_source(MARGIN_PATH, target))
+        add_source(futures_night_feature_source(FUTURES_NIGHT_PATH, target=target))
     else:
         # 美股使用與台股同語意/schema 的對應資料檔:
         # us_institutional_investors.csv: date, stock_id, name, buy, sell
         # us_margin_trading.csv: date, stock_id, MarginPurchase*/ShortSale*
         # us_futures_night.csv: date, stock_id, spread, spread_per, volume
-        out = add_institution_features(out, US_INSTITUTION_PATH, target)
-        out = add_margin_features(out, US_MARGIN_PATH, target)
-        out = add_futures_night_features(out, US_FUTURES_NIGHT_PATH, target=target)
+        add_source(institution_feature_source(US_INSTITUTION_PATH, target))
+        add_source(margin_feature_source(US_MARGIN_PATH, target))
+        add_source(futures_night_feature_source(US_FUTURES_NIGHT_PATH, target=target))
     return out
 
 
@@ -925,8 +1302,12 @@ def main():
 
     price_df = read_price_data(PRICE_PATH, args.target)
     event_path = event_path_for_target(args.target)
-    event_df = read_event_data(event_path)
-    print(f"Event features: {event_path}")
+    post_df = read_event_data(event_path)
+    sample_dates = real_price_series(price_df, args.target).index
+    decision_times = decision_times_for_samples(sample_dates, args.target)
+    event_df = aggregate_posts_for_decisions(post_df, sample_dates, decision_times)
+    print(f"Post-level event features: {event_path}")
+    print("Trump events are aggregated by Timestamp <= decision_time for each sample.")
     if args.presidential_terms_only:
         event_segment = presidential_term_segment(event_df.index)
         event_df = event_df.loc[event_segment > 0].copy()
