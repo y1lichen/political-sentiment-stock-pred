@@ -399,6 +399,13 @@ def binary_event_columns(event_df):
 
 
 def aggregate_posts_for_decisions(post_df, sample_dates, decision_times):
+    """Aggregate posts into the next holding-period window for each sample.
+
+    For close-to-next-close experiments, sample D predicts D close -> next close.
+    Trump posts after D close and before the next decision time are assigned to
+    sample D, matching the project assumption that overnight Trump posts can be
+    used to explain/predict the next trading day.
+    """
     sample_dates = pd.to_datetime(sample_dates)
     decision_times = pd.Series(decision_times, index=sample_dates).sort_index()
     out_index = decision_times.index
@@ -445,8 +452,8 @@ def aggregate_posts_for_decisions(post_df, sample_dates, decision_times):
     post_times = post_df["Timestamp"].sort_values()
     decision_ns = decision_times.to_numpy(dtype="datetime64[ns]")
     post_ns = post_times.to_numpy(dtype="datetime64[ns]")
-    positions = np.searchsorted(decision_ns, post_ns, side="left")
-    valid = positions < len(decision_times)
+    positions = np.searchsorted(decision_ns, post_ns, side="left") - 1
+    valid = (positions >= 0) & (positions < len(decision_times))
     if not valid.any():
         return binary_features_from_interval_counts(daily)
 
@@ -1307,7 +1314,7 @@ def main():
     decision_times = decision_times_for_samples(sample_dates, args.target)
     event_df = aggregate_posts_for_decisions(post_df, sample_dates, decision_times)
     print(f"Post-level event features: {event_path}")
-    print("Trump events are aggregated by Timestamp <= decision_time for each sample.")
+    print("Trump events are aggregated from decision_time_D < Timestamp <= decision_time_D+1.")
     if args.presidential_terms_only:
         event_segment = presidential_term_segment(event_df.index)
         event_df = event_df.loc[event_segment > 0].copy()
