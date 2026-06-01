@@ -19,6 +19,9 @@ PRICE_PATH = "data/taiwan_market_data/global_prices.csv"
 INSTITUTION_PATH = "data/taiwan_market_data/institutional_investors.csv"
 MARGIN_PATH = "data/taiwan_market_data/margin_trading.csv"
 FUTURES_NIGHT_PATH = "data/taiwan_market_data/tx_futures_night.csv"
+US_INSTITUTION_PATH = "data/taiwan_market_data/us_institutional_investors.csv"
+US_MARGIN_PATH = "data/taiwan_market_data/us_margin_trading.csv"
+US_FUTURES_NIGHT_PATH = "data/taiwan_market_data/us_futures_night.csv"
 
 COUNT_EVENT_COLS = {
     "post_count",
@@ -335,19 +338,27 @@ def add_margin_features(base, path, target):
     return base.join(margin, how="left")
 
 
-def add_futures_night_features(base, path):
+def add_futures_night_features(base, path, target=None):
     p = Path(path)
     if not p.exists():
         return base
 
     futures = pd.read_csv(p)
+    if target is not None and "stock_id" in futures.columns:
+        futures = futures[futures["stock_id"].astype(str) == target].copy()
+    if futures.empty:
+        return base
+
     futures["date"] = pd.to_datetime(futures["date"])
     futures = futures.sort_values("date").set_index("date")
     cols = [c for c in ["spread", "spread_per", "volume"] if c in futures.columns]
+    if not cols:
+        return base
     futures = futures[cols].add_prefix("tx_night_")
-    futures["tx_night_volume_z20"] = (
-        futures["tx_night_volume"] - futures["tx_night_volume"].rolling(20).mean()
-    ) / futures["tx_night_volume"].rolling(20).std()
+    if "tx_night_volume" in futures.columns:
+        futures["tx_night_volume_z20"] = (
+            futures["tx_night_volume"] - futures["tx_night_volume"].rolling(20).mean()
+        ) / futures["tx_night_volume"].rolling(20).std()
     return base.join(futures, how="left")
 
 
@@ -387,13 +398,18 @@ def make_market_features(price_df, target):
     if "^TNX" in price_df.columns:
         out["tnx_diff_1d"] = price_df["^TNX"].diff()
 
-    # 修改 #2:台股專屬特徵 (三大法人 / 融資融券 / 台指期夜盤) 只在台股標的時才加。
-    # 法人/融資對美股本來就會自動 no-op (stock_id 對不上),但 add_futures_night_features
-    # 不看 target、永遠加台指期夜盤 → 會把台指期硬塞給美股標的。改成條件式讓特徵集誠實。
     if target.endswith(".TW"):
         out = add_institution_features(out, INSTITUTION_PATH, target)
         out = add_margin_features(out, MARGIN_PATH, target)
         out = add_futures_night_features(out, FUTURES_NIGHT_PATH)
+    else:
+        # 美股使用與台股同語意/schema 的對應資料檔:
+        # us_institutional_investors.csv: date, stock_id, name, buy, sell
+        # us_margin_trading.csv: date, stock_id, MarginPurchase*/ShortSale*
+        # us_futures_night.csv: date, stock_id, spread, spread_per, volume
+        out = add_institution_features(out, US_INSTITUTION_PATH, target)
+        out = add_margin_features(out, US_MARGIN_PATH, target)
+        out = add_futures_night_features(out, US_FUTURES_NIGHT_PATH, target=target)
     return out
 
 
