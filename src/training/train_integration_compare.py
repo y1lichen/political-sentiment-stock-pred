@@ -36,6 +36,7 @@ def _build_args(
     all_features: bool,
     rebuild_dataset: bool,
     signal_threshold: float,
+    pos_weight: float,
 ):
     return argparse.Namespace(
         target=target,
@@ -51,6 +52,7 @@ def _build_args(
         weight_decay=1e-3,
         signal_threshold=signal_threshold,
         feature_set=feature_set,
+        pos_weight=pos_weight,
     )
 
 
@@ -75,6 +77,7 @@ def _train_and_load(project_root: Path, cfg: dict, target: str, args: argparse.N
         all_features=bool(cfg["all_features"]),
         rebuild_dataset=bool(args.rebuild_dataset),
         signal_threshold=float(cfg["signal_threshold"]),
+        pos_weight=float(cfg.get("pos_weight", 1.0)),
     )
     train(train_args)
 
@@ -167,6 +170,38 @@ def _build_moe_blend(market_pred: pd.DataFrame, step3_pred: pd.DataFrame, alpha_
     return fused
 
 
+def _build_weighted_blend(market_pred: pd.DataFrame, step3_pred: pd.DataFrame, w_step3: float) -> pd.DataFrame:
+    join_cols = ["date", "split", "target_direction_1d", "target_return_1d", "event_gate_default"]
+    base = market_pred[join_cols + ["pred_direction_proba"]].rename(columns={"pred_direction_proba": "proba_market"})
+    extra = step3_pred[["date", "split", "pred_direction_proba"]].rename(columns={"pred_direction_proba": "proba_step3"})
+    fused = base.merge(extra, on=["date", "split"], how="inner")
+    fused["pred_direction_proba"] = (1.0 - w_step3) * fused["proba_market"] + w_step3 * fused["proba_step3"]
+    return fused
+
+
+def _build_stacking_blend(market_pred: pd.DataFrame, step3_pred: pd.DataFrame) -> pd.DataFrame | None:
+    """Round-1: train a simple meta-learner on train split to fuse two probabilities."""
+    join_cols = ["date", "split", "target_direction_1d", "target_return_1d", "event_gate_default"]
+    base = market_pred[join_cols + ["pred_direction_proba"]].rename(columns={"pred_direction_proba": "proba_market"})
+    extra = step3_pred[["date", "split", "pred_direction_proba"]].rename(columns={"pred_direction_proba": "proba_step3"})
+    fused = base.merge(extra, on=["date", "split"], how="inner")
+
+    tr = fused[fused["split"] == "train"].copy()
+    if tr.empty:
+        return None
+    y_train = (tr["target_direction_1d"].astype(int).to_numpy() > 0).astype(int)
+    if len(np.unique(y_train)) < 2:
+        return None
+
+    x_train = tr[["proba_market", "proba_step3"]].astype(float).to_numpy()
+    lr = LogisticRegression(random_state=42, max_iter=1000)
+    lr.fit(x_train, y_train)
+
+    x_all = fused[["proba_market", "proba_step3"]].astype(float).to_numpy()
+    fused["pred_direction_proba"] = lr.predict_proba(x_all)[:, 1]
+    return fused
+
+
 def _safe_float(x, fallback: float = float("-inf")) -> float:
     if x is None:
         return fallback
@@ -251,6 +286,7 @@ def run_compare(args: argparse.Namespace) -> None:
             "feature_budget": args.feature_budget,
             "all_features": args.all_features,
             "signal_threshold": args.signal_threshold,
+            "pos_weight": 1.0,
         },
         {
             "tag": "trump_full",
@@ -259,17 +295,18 @@ def run_compare(args: argparse.Namespace) -> None:
             "feature_budget": args.feature_budget,
             "all_features": args.all_features,
             "signal_threshold": args.signal_threshold,
+            "pos_weight": 1.0,
         },
     ]
 
     step3_candidates = [
-        {"tag": "step3_integrated", "model": "event_gated_mlp", "feature_set": "Global_plus_Trump_no_gate", "feature_budget": 80, "all_features": False, "signal_threshold": 0.55},
-        {"tag": "step3_integrated", "model": "event_gated_mlp", "feature_set": "Global_plus_Trump_no_gate", "feature_budget": 48, "all_features": False, "signal_threshold": 0.60},
-        {"tag": "step3_integrated", "model": "small_mlp", "feature_set": "Global_plus_Trump_no_gate", "feature_budget": 48, "all_features": False, "signal_threshold": 0.60},
-        {"tag": "step3_integrated", "model": "logistic", "feature_set": "Global_plus_Trump_no_gate", "feature_budget": 48, "all_features": False, "signal_threshold": 0.60},
-        {"tag": "step3_integrated", "model": "elasticnet", "feature_set": "Global_plus_Trump_no_gate", "feature_budget": 48, "all_features": False, "signal_threshold": 0.60},
-        {"tag": "step3_integrated", "model": "logistic", "feature_set": "Global_plus_Trump_no_gate", "feature_budget": 80, "all_features": False, "signal_threshold": 0.55},
-        {"tag": "step3_integrated", "model": "elasticnet", "feature_set": "Global_plus_Trump_no_gate", "feature_budget": 80, "all_features": False, "signal_threshold": 0.55},
+        {"tag": "step3_integrated", "model": "event_gated_mlp", "feature_set": "Global_plus_Trump_no_gate", "feature_budget": 80, "all_features": False, "signal_threshold": 0.55, "pos_weight": 1.0},
+        {"tag": "step3_integrated", "model": "event_gated_mlp", "feature_set": "Global_plus_Trump_no_gate", "feature_budget": 48, "all_features": False, "signal_threshold": 0.60, "pos_weight": 1.0},
+        {"tag": "step3_integrated", "model": "small_mlp", "feature_set": "Global_plus_Trump_no_gate", "feature_budget": 48, "all_features": False, "signal_threshold": 0.60, "pos_weight": 1.0},
+        {"tag": "step3_integrated", "model": "logistic", "feature_set": "Global_plus_Trump_no_gate", "feature_budget": 48, "all_features": False, "signal_threshold": 0.60, "pos_weight": 1.0},
+        {"tag": "step3_integrated", "model": "elasticnet", "feature_set": "Global_plus_Trump_no_gate", "feature_budget": 48, "all_features": False, "signal_threshold": 0.60, "pos_weight": 1.0},
+        {"tag": "step3_integrated", "model": "logistic", "feature_set": "Global_plus_Trump_no_gate", "feature_budget": 80, "all_features": False, "signal_threshold": 0.55, "pos_weight": 1.0},
+        {"tag": "step3_integrated", "model": "elasticnet", "feature_set": "Global_plus_Trump_no_gate", "feature_budget": 80, "all_features": False, "signal_threshold": 0.55, "pos_weight": 1.0},
     ]
 
     if args.deep_only:
@@ -302,8 +339,18 @@ def run_compare(args: argparse.Namespace) -> None:
 
         lam = float(args.val_auc_weight)
         target_candidates = step3_candidates
+        laggard_pw_targets = {"00632R.TW", "2377.TW", "2454.TW"}
+        if target in laggard_pw_targets:
+            extra_pw = []
+            for c in step3_candidates:
+                if c["model"] in {"event_gated_mlp", "small_mlp"}:
+                    for pw in [1.2, 1.5, 2.0]:
+                        cc = dict(c)
+                        cc["pos_weight"] = pw
+                        extra_pw.append(cc)
+            target_candidates = step3_candidates + extra_pw
         if (not args.deep_only) and target == "2454.TW":
-            target_candidates = [c for c in step3_candidates if c["model"] in {"elasticnet", "logistic", "small_mlp"}] or step3_candidates
+            target_candidates = [c for c in target_candidates if c["model"] in {"elasticnet", "logistic", "small_mlp", "event_gated_mlp"}] or target_candidates
 
         for cand in target_candidates:
             metrics_raw, pred_raw = _train_and_load(project_root, cand, target, args)
@@ -356,6 +403,7 @@ def run_compare(args: argparse.Namespace) -> None:
         best_beta = 0.0
         best_mix_score = float("-inf")
         best_fused = None
+        best_moe_name = "alpha_beta"
 
         for alpha in alpha_grid:
             for beta in beta_grid:
@@ -368,18 +416,99 @@ def run_compare(args: argparse.Namespace) -> None:
                 cls = classification_metrics(y_true, y_proba)
                 sig = signal_metrics(val, threshold=float(args.signal_threshold))
                 score = (
-                    _safe_float(cls.get("f1"))
-                    + lam * _safe_float(cls.get("auc"), fallback=0.5)
-                    + 0.03 * _safe_float(sig.get("sharpe"), fallback=0.0)
+                    1.0 * _safe_float(cls.get("f1"))
+                    + 0.15 * _safe_float(cls.get("auc"), fallback=0.5)
                 )
                 if score > best_mix_score:
                     best_mix_score = float(score)
                     best_alpha = float(alpha)
                     best_beta = float(beta)
                     best_fused = fused
+                    best_moe_name = "alpha_beta"
+
+        cls_auc_w = 0.20
+
+        stacked = _build_stacking_blend(market_pred, step3_pred)
+        if stacked is not None:
+            val = stacked[stacked["split"] == "val"]
+            if not val.empty:
+                y_true = val["target_direction_1d"].astype(int).to_numpy()
+                y_proba = val["pred_direction_proba"].astype(float).to_numpy()
+                cls = classification_metrics(y_true, y_proba)
+                score = _safe_float(cls.get("f1")) + cls_auc_w * _safe_float(cls.get("auc"), fallback=0.5)
+                if score > best_mix_score:
+                    best_mix_score = float(score)
+                    best_alpha = float("nan")
+                    best_beta = float("nan")
+                    best_fused = stacked
+                    best_moe_name = "stacking_lr"
+
+        for w in [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]:
+            blended = _build_weighted_blend(market_pred, step3_pred, w_step3=float(w))
+            val = blended[blended["split"] == "val"]
+            if val.empty:
+                continue
+            y_true = val["target_direction_1d"].astype(int).to_numpy()
+            y_proba = val["pred_direction_proba"].astype(float).to_numpy()
+            cls = classification_metrics(y_true, y_proba)
+            score = _safe_float(cls.get("f1")) + cls_auc_w * _safe_float(cls.get("auc"), fallback=0.5)
+            if score > best_mix_score:
+                best_mix_score = float(score)
+                best_alpha = float("nan")
+                best_beta = float(w)
+                best_fused = blended
+                best_moe_name = "weighted_blend"
 
         if best_fused is None:
             best_fused = _build_moe_blend(market_pred, step3_pred, alpha_event=0.0, beta_non_event=0.0)
+
+        # Round-7: laggard-specific preference to avoid alpha_beta overfitting.
+        laggard_pref_targets = {"00632R.TW", "2377.TW", "2454.TW"}
+        if target in laggard_pref_targets and best_moe_name == "alpha_beta":
+            cand = []
+            for w in [0.25, 0.35, 0.45, 0.55, 0.65, 0.75]:
+                b = _build_weighted_blend(market_pred, step3_pred, w_step3=float(w))
+                v = b[b["split"] == "val"]
+                if v.empty:
+                    continue
+                yt = v["target_direction_1d"].astype(int).to_numpy()
+                yp = v["pred_direction_proba"].astype(float).to_numpy()
+                cls = classification_metrics(yt, yp)
+                sc = _safe_float(cls.get("f1")) + 0.15 * _safe_float(cls.get("auc"), fallback=0.5)
+                cand.append((sc, "weighted_blend", w, b))
+            st = _build_stacking_blend(market_pred, step3_pred)
+            if st is not None:
+                v = st[st["split"] == "val"]
+                if not v.empty:
+                    yt = v["target_direction_1d"].astype(int).to_numpy()
+                    yp = v["pred_direction_proba"].astype(float).to_numpy()
+                    cls = classification_metrics(yt, yp)
+                    sc = _safe_float(cls.get("f1")) + 0.15 * _safe_float(cls.get("auc"), fallback=0.5)
+                    cand.append((sc, "stacking_lr", float("nan"), st))
+            if cand:
+                cand = sorted(cand, key=lambda x: x[0], reverse=True)
+                sc, name, wb, bf = cand[0]
+                best_moe_name = name
+                best_beta = wb
+                best_alpha = float("nan")
+                best_fused = bf
+
+        val_base = market_pred[market_pred["split"] == "val"]
+        val_fused = best_fused[best_fused["split"] == "val"]
+        if (not val_base.empty) and (not val_fused.empty):
+            f1_base = _safe_float(classification_metrics(
+                val_base["target_direction_1d"].astype(int).to_numpy(),
+                val_base["pred_direction_proba"].astype(float).to_numpy(),
+            ).get("f1"), fallback=-1.0)
+            f1_fused = _safe_float(classification_metrics(
+                val_fused["target_direction_1d"].astype(int).to_numpy(),
+                val_fused["pred_direction_proba"].astype(float).to_numpy(),
+            ).get("f1"), fallback=-1.0)
+            if f1_fused < f1_base:
+                best_fused = market_pred.copy()
+                best_alpha = float("nan")
+                best_beta = float("nan")
+                best_moe_name = "fallback_market_only"
 
         moe_row = _row_from_predframe(
             target=target,
@@ -388,7 +517,7 @@ def run_compare(args: argparse.Namespace) -> None:
             feature_set="event_gate_alpha_beta_blend",
             threshold=float(args.signal_threshold),
             frame=best_fused,
-            selected_from=f"alpha_event={best_alpha}|beta_non_event={best_beta}|obj=v9_event_linear_moe",
+            selected_from=f"blend={best_moe_name}|alpha_event={best_alpha}|beta_non_event={best_beta}|obj=v16_round7_laggard_pref",
         )
         rows.append(moe_row)
 

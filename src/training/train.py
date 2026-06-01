@@ -67,6 +67,7 @@ def fit_torch_model(
     epochs: int,
     lr: float,
     weight_decay: float,
+    pos_weight: float,
 ) -> dict:
     imputer = SimpleImputer(strategy="median")
     scaler = StandardScaler()
@@ -92,7 +93,7 @@ def fit_torch_model(
     )
     loader = DataLoader(ds, batch_size=64, shuffle=True)
     opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
-    bce = nn.BCEWithLogitsLoss(reduction="none")
+    bce = nn.BCEWithLogitsLoss(reduction="none", pos_weight=torch.tensor([max(1e-6, float(pos_weight))], dtype=torch.float32))
     huber = nn.HuberLoss(reduction="none", delta=0.01)
     best_state = None
     best_loss = math.inf
@@ -224,6 +225,7 @@ def train(args: argparse.Namespace) -> None:
             epochs=args.epochs,
             lr=args.lr,
             weight_decay=args.weight_decay,
+            pos_weight=args.pos_weight,
         )
         model_path = paths.models_dir / f"{stem}.pt"
         metadata = {
@@ -315,6 +317,7 @@ def main() -> None:
     parser.add_argument("--epochs", type=int, default=80)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--weight-decay", type=float, default=1e-3)
+    parser.add_argument("--pos-weight", type=float, default=1.0, help="Positive-class weight for BCE in torch models.")
     parser.add_argument("--signal-threshold", type=float, default=0.55)
     parser.add_argument(
         "--feature-set",
