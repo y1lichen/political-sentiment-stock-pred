@@ -15,6 +15,7 @@ from torch.utils.data import DataLoader, Dataset
 
 
 PRICE_PATH = "data/taiwan_market_data/global_prices.csv"
+RAW_EVENT_INPUT_PATH = "data/text/trump_posts_features_2017_2026.csv"
 # 事件特徵改成 per-market;由 event_path_for_target() 依 --target 挑 _us / _tw 那份。
 INSTITUTION_PATH = "data/taiwan_market_data/institutional_investors.csv"
 MARGIN_PATH = "data/taiwan_market_data/margin_trading.csv"
@@ -37,6 +38,9 @@ COUNT_EVENT_COLS = {
     "open_post_count",
     "total_excl",
     "avg_post_len",
+    "all_caps_post_count",
+    "exclaim_post_count",
+    "uppercase_phrase_count",
 }
 
 REGIME_LABELS = {
@@ -171,10 +175,36 @@ def read_price_data(path, target):
     return price_df
 
 
+def ensure_event_feature_files():
+    """Build relabeled per-market Trump event files from the raw post CSV when missing."""
+    expected = [
+        Path("data/output/trump_posts_with_event_features_us.csv"),
+        Path("data/output/trump_posts_with_event_features_tw.csv"),
+    ]
+    if all(path.exists() for path in expected):
+        return
+
+    raw_path = Path(RAW_EVENT_INPUT_PATH)
+    if not raw_path.exists():
+        raise FileNotFoundError(
+            f"Raw Trump post file not found: {RAW_EVENT_INPUT_PATH}. "
+            "Cannot rebuild relabeled event features."
+        )
+
+    from data.data_preprocess import main as preprocess_main
+
+    print("Relabeled Trump event feature files are missing; rebuilding from raw CSV.")
+    preprocess_main()
+
+
 def event_path_for_target(target):
     """依標的所在市場挑 post-level 事件特徵 CSV, 若分市場檔不存在則回退到共用事件檔。"""
     suffix = "tw" if target.endswith(".TW") else "us"
     market_path = Path(f"data/output/trump_posts_with_event_features_{suffix}.csv")
+    if market_path.exists():
+        return str(market_path)
+
+    ensure_event_feature_files()
     if market_path.exists():
         return str(market_path)
 
@@ -443,6 +473,9 @@ def aggregate_posts_for_decisions(post_df, sample_dates, decision_times):
         "total_caps",
         "total_alpha",
         "avg_post_len",
+        "all_caps_post_count",
+        "exclaim_post_count",
+        "uppercase_phrase_count",
         "sig_djt_count",
         "sig_potus_count",
         "sig_tyfa_count",
@@ -490,6 +523,9 @@ def aggregate_posts_for_decisions(post_df, sample_dates, decision_times):
         "exclamation_count",
         "caps_count",
         "alpha_count",
+        "is_all_caps_post",
+        "has_exclamation_mark",
+        "has_uppercase_phrase",
         "post_len",
         "sig_djt",
         "sig_potus",
@@ -521,6 +557,9 @@ def aggregate_posts_for_decisions(post_df, sample_dates, decision_times):
         "total_excl": "exclamation_count",
         "total_caps": "caps_count",
         "total_alpha": "alpha_count",
+        "all_caps_post_count": "is_all_caps_post",
+        "exclaim_post_count": "has_exclamation_mark",
+        "uppercase_phrase_count": "has_uppercase_phrase",
         "sig_djt_count": "sig_djt",
         "sig_potus_count": "sig_potus",
         "sig_tyfa_count": "sig_tyfa",
@@ -559,6 +598,9 @@ def binary_features_from_interval_counts(daily):
     out["open_post_count"] = daily["open_post_count"]
     out["total_excl"] = daily["total_excl"]
     out["avg_post_len"] = daily["avg_post_len"]
+    out["all_caps_post_count"] = daily["all_caps_post_count"]
+    out["exclaim_post_count"] = daily["exclaim_post_count"]
+    out["uppercase_phrase_count"] = daily["uppercase_phrase_count"]
 
     out["posts_high"] = (daily["post_count"] >= 20).astype(int)
     out["posts_low"] = (daily["post_count"] <= 5).astype(int)
@@ -593,6 +635,12 @@ def binary_features_from_interval_counts(daily):
 
     caps_ratio = daily["total_caps"] / daily["total_alpha"].replace(0, np.nan)
     out["high_emotion"] = (caps_ratio.fillna(0) > 0.2).astype(int)
+    out["has_all_caps"] = (daily["all_caps_post_count"] >= 1).astype(int)
+    out["all_caps_heavy"] = (daily["all_caps_post_count"] >= 3).astype(int)
+    out["has_uppercase_phrase"] = (daily["uppercase_phrase_count"] >= 1).astype(int)
+    out["uppercase_phrase_heavy"] = (daily["uppercase_phrase_count"] >= 3).astype(int)
+    out["has_exclamation"] = (daily["exclaim_post_count"] >= 1).astype(int)
+    out["exclamation_heavy"] = (daily["exclaim_post_count"] >= 3).astype(int)
     out["lots_of_excl"] = (daily["total_excl"] >= 5).astype(int)
     out["long_posts"] = (daily["avg_post_len"] > 400).astype(int)
     out["short_posts"] = ((daily["avg_post_len"] < 150) & (daily["post_count"] > 0)).astype(int)

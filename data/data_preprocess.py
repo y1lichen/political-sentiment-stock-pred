@@ -18,6 +18,19 @@ def contains_any(text, words):
     return int(any(w in text for w in words))
 
 
+def has_uppercase_phrase(text, min_words=5):
+    tokens = re.findall(r"[A-Za-z]+", str(text))
+    run = 0
+    for token in tokens:
+        if len(token) > 1 and token.isupper():
+            run += 1
+            if run >= min_words:
+                return 1
+        else:
+            run = 0
+    return 0
+
+
 def normalize_date_column(df):
     if "Date" in df.columns:
         date_col = "Date"
@@ -127,6 +140,11 @@ def add_post_level_features(df, market="us", trading_calendar=None):
     df["caps_count"] = df["Content"].apply(lambda x: sum(ch.isupper() for ch in x))
     df["caps_alpha_ratio"] = df["caps_count"] / df["alpha_count"].replace(0, np.nan)
     df["caps_alpha_ratio"] = df["caps_alpha_ratio"].fillna(0.0)
+    df["is_all_caps_post"] = (
+        (df["alpha_count"] >= 10) & (df["caps_alpha_ratio"] >= 0.8)
+    ).astype(int)
+    df["has_exclamation_mark"] = (df["exclamation_count"] >= 1).astype(int)
+    df["has_uppercase_phrase"] = df["Content"].apply(has_uppercase_phrase).astype(int)
 
     # trump_code 類別事件
     df["ev_tariff"] = (
@@ -219,6 +237,9 @@ def build_daily_binary_features(post_df):
         total_caps=("caps_count", "sum"),
         total_alpha=("alpha_count", "sum"),
         avg_post_len=("post_len", "mean"),
+        all_caps_post_count=("is_all_caps_post", "sum"),
+        exclaim_post_count=("has_exclamation_mark", "sum"),
+        uppercase_phrase_count=("has_uppercase_phrase", "sum"),
 
         night_post_count=("is_night_post", "sum"),
         pre_post_count=("is_pre_market_post", "sum"),
@@ -294,6 +315,12 @@ def build_daily_binary_features(post_df):
     caps_ratio = daily["total_caps"] / daily["total_alpha"].replace(0, np.nan)
     out["high_emotion"] = (caps_ratio.fillna(0) > 0.2).astype(int)
 
+    out["has_all_caps"] = (daily["all_caps_post_count"] >= 1).astype(int)
+    out["all_caps_heavy"] = (daily["all_caps_post_count"] >= 3).astype(int)
+    out["has_uppercase_phrase"] = (daily["uppercase_phrase_count"] >= 1).astype(int)
+    out["uppercase_phrase_heavy"] = (daily["uppercase_phrase_count"] >= 3).astype(int)
+    out["has_exclamation"] = (daily["exclaim_post_count"] >= 1).astype(int)
+    out["exclamation_heavy"] = (daily["exclaim_post_count"] >= 3).astype(int)
     out["lots_of_excl"] = (daily["total_excl"] >= 5).astype(int)
     out["long_posts"] = (daily["avg_post_len"] > 400).astype(int)
     out["short_posts"] = ((daily["avg_post_len"] < 150) & (daily["post_count"] > 0)).astype(int)
@@ -359,7 +386,8 @@ def build_daily_binary_features(post_df):
         "post_count", "tariff_count", "deal_count", "relief_count",
         "china_count", "taiwan_count", "chips_count", "ai_count",
         "night_post_count", "pre_post_count", "open_post_count",
-        "total_excl", "avg_post_len"
+        "total_excl", "avg_post_len", "all_caps_post_count",
+        "exclaim_post_count", "uppercase_phrase_count"
     ]
 
     final = pd.concat([daily[count_cols], out], axis=1)
@@ -394,7 +422,9 @@ def main():
             "trump_date", "post_count", "tariff_count", "deal_count",
             "relief_count", "china_count", "taiwan_count", "chips_count",
             "ai_count", "night_post_count", "pre_post_count",
-            "open_post_count", "total_excl", "avg_post_len"
+            "open_post_count", "total_excl", "avg_post_len",
+            "all_caps_post_count", "exclaim_post_count",
+            "uppercase_phrase_count"
         ]
     ]
 

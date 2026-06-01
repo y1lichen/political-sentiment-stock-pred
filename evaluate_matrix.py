@@ -38,6 +38,11 @@ STRATEGY_NAME = "full_event_market_gated_mlp"
 BASELINE_STRATEGY_NAME = "market_only_gated_mlp"
 OUTPUT_CSV_NAME = "my_model_vs_baseline_all_markets.csv"
 
+EVENT_FEATURE_FILES = [
+    "data/output/trump_posts_with_event_features_us.csv",
+    "data/output/trump_posts_with_event_features_tw.csv",
+]
+
 # 你的 Gated MLP 啟動指令 (使用最好的設定)
 BASE_CMD = [
     "python", "event_combo.py",
@@ -50,6 +55,14 @@ BASE_CMD = [
     "--epochs", "80",
     "--batch-size", "64"
 ]
+
+
+def ensure_event_features():
+    """Ensure event_combo.py will use the relabeled per-market Trump event data."""
+    if all(os.path.exists(path) for path in EVENT_FEATURE_FILES):
+        return
+    print("Relabeled Trump event files missing; running data/data_preprocess.py first.")
+    subprocess.run(["python", "data/data_preprocess.py"], check=True)
 
 def total_return(returns):
     returns = pd.Series(returns).fillna(0.0)
@@ -131,6 +144,7 @@ def calculate_metrics(target, full_pred_path, baseline_pred_path):
     }
 
 def main():
+    ensure_event_features()
     results = []
     
     for target in TARGETS:
