@@ -116,6 +116,18 @@ def calculate_metrics(target, full_pred_path, baseline_pred_path):
     baseline = prediction_metrics(baseline_pred_path)
     full_event_days = summary_event_days(os.path.join(os.path.dirname(full_pred_path), "summary.json"))
     baseline_event_days = summary_event_days(os.path.join(os.path.dirname(baseline_pred_path), "summary.json"))
+    full_rule_event_days = summary_event_days(
+        os.path.join(os.path.dirname(full_pred_path), "summary.json"),
+        key="test_rule_event_days",
+    )
+    full_event_day_threshold = summary_event_days(
+        os.path.join(os.path.dirname(full_pred_path), "summary.json"),
+        key="test_model_event_day_threshold",
+    )
+    full_hybrid_event_days = summary_event_days(
+        os.path.join(os.path.dirname(full_pred_path), "summary.json"),
+        key="test_hybrid_event_days",
+    )
 
     return {
         "target": target,
@@ -180,10 +192,19 @@ def calculate_metrics(target, full_pred_path, baseline_pred_path):
         "baseline_event_days_cumret": baseline_event_days["strategy_total_return_no_cost"],
         "baseline_event_days_trade_accuracy": baseline_event_days["trade_accuracy"],
         "baseline_event_days_trades": baseline_event_days["trade_count"],
+        "rule_event_days_cumret": full_rule_event_days["strategy_total_return_no_cost"],
+        "rule_event_days_trade_accuracy": full_rule_event_days["trade_accuracy"],
+        "rule_event_days_trades": full_rule_event_days["trade_count"],
+        "event_day_threshold_cumret": full_event_day_threshold["strategy_total_return_no_cost"],
+        "event_day_threshold_trade_accuracy": full_event_day_threshold["trade_accuracy"],
+        "event_day_threshold_trades": full_event_day_threshold["trade_count"],
+        "hybrid_event_days_cumret": full_hybrid_event_days["strategy_total_return_no_cost"],
+        "hybrid_event_days_trade_accuracy": full_hybrid_event_days["trade_accuracy"],
+        "hybrid_event_days_trades": full_hybrid_event_days["trade_count"],
     }
 
 
-def summary_event_days(summary_path):
+def summary_event_days(summary_path, key="test_event_days"):
     defaults = {
         "event_days": 0,
         "event_coverage": 0.0,
@@ -201,7 +222,7 @@ def summary_event_days(summary_path):
         return defaults
     with open(summary_path, "r", encoding="utf-8") as f:
         data = json.load(f)
-    return {**defaults, **data.get("test_event_days", {})}
+    return {**defaults, **data.get(key, {})}
 
 def main():
     ensure_event_features()
@@ -275,7 +296,12 @@ def main():
             'baseline_event_days_precision', 'baseline_event_days_recall',
             'baseline_event_days_accuracy', 'baseline_event_days_auc',
             'baseline_event_days_sharpe', 'baseline_event_days_cumret',
-            'baseline_event_days_trade_accuracy', 'baseline_event_days_trades'
+            'baseline_event_days_trade_accuracy', 'baseline_event_days_trades',
+            'rule_event_days_cumret', 'rule_event_days_trade_accuracy',
+            'rule_event_days_trades', 'event_day_threshold_cumret',
+            'event_day_threshold_trade_accuracy', 'event_day_threshold_trades',
+            'hybrid_event_days_cumret', 'hybrid_event_days_trade_accuracy',
+            'hybrid_event_days_trades'
         ]
         
         df_results = pd.DataFrame(results)[columns_order]

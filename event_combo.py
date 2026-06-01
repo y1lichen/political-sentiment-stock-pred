@@ -101,6 +101,12 @@ def parse_args():
             "Score = abs(mean_ret) * sqrt(n) * directional_hit."
         ),
     )
+    parser.add_argument(
+        "--max-event-jaccard",
+        type=float,
+        default=0.90,
+        help="Drop lower-scored selected events whose active-day Jaccard similarity exceeds this threshold.",
+    )
     parser.add_argument("--top-k-events", type=int, default=80, help="Max brute-force event combos used by DL.")
     parser.add_argument("--epochs", type=int, default=40)
     parser.add_argument("--batch-size", type=int, default=64)
@@ -147,6 +153,17 @@ def parse_args():
         type=float,
         default=0.05,
         help="Minimum validation trade coverage when auto-tuning the neutral threshold.",
+    )
+    parser.add_argument(
+        "--min-val-event-trade-coverage",
+        type=float,
+        default=0.05,
+        help="Minimum validation event-day trade coverage for event-day-only and hybrid threshold tuning.",
+    )
+    parser.add_argument(
+        "--hybrid-alpha-grid",
+        default="0,0.25,0.5,1,2,4",
+        help="Comma-separated alpha grid for hybrid_edge = direction_edge + alpha * normalized_event_rule_score.",
     )
     parser.add_argument(
         "--trade-mode",
@@ -696,7 +713,49 @@ def make_event_combos(event_df, max_combo_size=2):
     return combo_df, event_cols
 
 
-def brute_force_events(combo_df, price, hold, min_n, min_abs_mean_ret, min_hit_rate, min_score, top_k):
+def event_jaccard(a, b):
+    a = np.asarray(a, dtype=bool)
+    b = np.asarray(b, dtype=bool)
+    union = np.logical_or(a, b).sum()
+    if union == 0:
+        return 0.0
+    return float(np.logical_and(a, b).sum() / union)
+
+
+def dedupe_selected_events(selected_df, combo_df, max_jaccard):
+    if selected_df.empty or max_jaccard >= 1:
+        return selected_df.copy(), 0
+
+    kept_rows = []
+    kept_masks = []
+    dropped = 0
+    for row in selected_df.itertuples(index=False):
+        event_col = row.event
+        if event_col not in combo_df.columns:
+            continue
+        mask = combo_df[event_col].fillna(0).to_numpy() > 0
+        if any(event_jaccard(mask, kept) > max_jaccard for kept in kept_masks):
+            dropped += 1
+            continue
+        kept_rows.append(row._asdict())
+        kept_masks.append(mask)
+
+    if not kept_rows:
+        return selected_df.head(1).copy(), max(dropped, len(selected_df) - 1)
+    return pd.DataFrame(kept_rows), dropped
+
+
+def brute_force_events(
+    combo_df,
+    price,
+    hold,
+    min_n,
+    min_abs_mean_ret,
+    min_hit_rate,
+    min_score,
+    top_k,
+    max_event_jaccard,
+):
     future_ret = price.shift(-hold) / price - 1
     data = combo_df.join(future_ret.rename("future_ret"), how="inner")
 
@@ -754,8 +813,10 @@ def brute_force_events(combo_df, price, hold, min_n, min_abs_mean_ret, min_hit_r
         ].copy()
         if fallback.empty:
             fallback = result_df.head(min(top_k, 20)).copy()
-        selected_df = fallback.head(top_k).copy()
+        selected_df, deduped_events = dedupe_selected_events(fallback, combo_df, max_event_jaccard)
+        selected_df = selected_df.head(top_k).copy()
     else:
+        selected_df, deduped_events = dedupe_selected_events(selected_df, combo_df, max_event_jaccard)
         selected_df = selected_df.head(top_k).copy()
 
     selection_stats = {
@@ -766,6 +827,8 @@ def brute_force_events(combo_df, price, hold, min_n, min_abs_mean_ret, min_hit_r
         "min_abs_mean_ret": float(min_abs_mean_ret),
         "min_hit_rate": float(min_hit_rate),
         "min_score": float(min_score),
+        "max_event_jaccard": float(max_event_jaccard),
+        "deduped_events": int(deduped_events),
     }
     return selected_df["event"].tolist(), result_df, selected_df, selection_stats
 
@@ -1350,28 +1413,52 @@ def predictions_frame(metrics, trade_edge_threshold, trade_mode):
     out["actual_regime_name"] = out["actual_regime"].map(REGIME_LABELS)
     out["pred_regime_name"] = out["pred_regime"].map(REGIME_LABELS)
     out["direction_edge"] = out["prob_up"] - out["prob_down"]
-    raw_signal = np.where(out["direction_edge"] > 0, 1.0, -1.0)
-    confident = out["direction_edge"].abs() >= trade_edge_threshold
+    apply_trade_signal_columns(
+        out,
+        edge_col="direction_edge",
+        threshold=trade_edge_threshold,
+        trade_mode=trade_mode,
+        signal_col="trade_signal",
+        decision_col="trade_decision",
+        ret_col="strategy_ret_no_cost",
+    )
+    return out
+
+
+def apply_trade_signal_columns(
+    df,
+    edge_col,
+    threshold,
+    trade_mode,
+    signal_col,
+    decision_col,
+    ret_col,
+    active_mask=None,
+):
+    raw_signal = np.where(df[edge_col] > 0, 1.0, -1.0)
+    confident = df[edge_col].abs() >= threshold
+    if active_mask is not None:
+        confident = confident & active_mask
     if trade_mode == "long_cash":
         signal = np.where(confident & (raw_signal > 0), 1.0, 0.0)
     elif trade_mode == "short_cash":
         signal = np.where(confident & (raw_signal < 0), -1.0, 0.0)
     else:
         signal = np.where(confident, raw_signal, 0.0)
-    out["trade_signal"] = signal
-    out["trade_decision"] = out["trade_signal"].map({-1.0: "SHORT", 0.0: "NEUTRAL", 1.0: "LONG"})
-    out["strategy_ret_no_cost"] = out["trade_signal"] * out["future_ret"]
-    return out
+    df[signal_col] = signal
+    df[decision_col] = pd.Series(signal, index=df.index).map({-1.0: "SHORT", 0.0: "NEUTRAL", 1.0: "LONG"})
+    df[ret_col] = df[signal_col] * df["future_ret"]
+    return df
 
 
-def strategy_metrics(pred_df):
+def strategy_metrics(pred_df, signal_col="trade_signal", ret_col="strategy_ret_no_cost"):
     return {
-        "trade_coverage": float((pred_df["trade_signal"] != 0).mean()),
-        "neutral_count": int((pred_df["trade_signal"] == 0).sum()),
-        "long_count": int((pred_df["trade_signal"] > 0).sum()),
-        "short_count": int((pred_df["trade_signal"] < 0).sum()),
-        "strategy_mean_return_no_cost": float(pred_df["strategy_ret_no_cost"].mean()),
-        "strategy_total_return_no_cost": float((1 + pred_df["strategy_ret_no_cost"]).prod() - 1),
+        "trade_coverage": float((pred_df[signal_col] != 0).mean()) if len(pred_df) else 0.0,
+        "neutral_count": int((pred_df[signal_col] == 0).sum()) if len(pred_df) else 0,
+        "long_count": int((pred_df[signal_col] > 0).sum()) if len(pred_df) else 0,
+        "short_count": int((pred_df[signal_col] < 0).sum()) if len(pred_df) else 0,
+        "strategy_mean_return_no_cost": float(pred_df[ret_col].mean()) if len(pred_df) else 0.0,
+        "strategy_total_return_no_cost": float((1 + pred_df[ret_col]).prod() - 1) if len(pred_df) else 0.0,
     }
 
 
@@ -1383,7 +1470,7 @@ def sharpe_like(returns):
     return float(np.sqrt(252) * returns.mean() / std)
 
 
-def event_days_only_metrics(pred_df):
+def event_days_only_metrics(pred_df, signal_col="trade_signal", ret_col="strategy_ret_no_cost"):
     if "event_any_selected" not in pred_df.columns:
         return {"event_days": 0, "event_coverage": 0.0}
 
@@ -1400,7 +1487,7 @@ def event_days_only_metrics(pred_df):
             "trade_accuracy": 0.0,
             "trade_count": 0,
             "sharpe": 0.0,
-            **strategy_metrics(event_df),
+            **strategy_metrics(event_df, signal_col=signal_col, ret_col=ret_col),
         }
 
     actual = event_df["actual_label"].astype(int)
@@ -1411,11 +1498,11 @@ def event_days_only_metrics(pred_df):
     except ValueError:
         auc = 0.5
 
-    traded = event_df[event_df["trade_signal"] != 0]
+    traded = event_df[event_df[signal_col] != 0]
     if traded.empty:
         trade_accuracy = 0.0
     else:
-        trade_correct = np.sign(traded["trade_signal"]) == np.sign(traded["future_ret"])
+        trade_correct = np.sign(traded[signal_col]) == np.sign(traded["future_ret"])
         trade_accuracy = float(trade_correct.mean())
 
     return {
@@ -1428,8 +1515,8 @@ def event_days_only_metrics(pred_df):
         "auc": float(auc),
         "trade_accuracy": trade_accuracy,
         "trade_count": int(len(traded)),
-        "sharpe": sharpe_like(event_df["strategy_ret_no_cost"]),
-        **strategy_metrics(event_df),
+        "sharpe": sharpe_like(event_df[ret_col]),
+        **strategy_metrics(event_df, signal_col=signal_col, ret_col=ret_col),
     }
 
 
@@ -1450,6 +1537,115 @@ def tune_trade_threshold(metrics, trade_mode, fallback_threshold, min_coverage):
         ascending=[False, False],
     )
     return float(eligible.iloc[0]["trade_edge_threshold"]), search_df
+
+
+def parse_float_grid(value):
+    out = []
+    for item in str(value).split(","):
+        item = item.strip()
+        if not item:
+            continue
+        out.append(float(item))
+    return out or [0.0]
+
+
+def tune_edge_threshold_on_subset(
+    pred_df,
+    edge_col,
+    trade_mode,
+    min_coverage,
+    signal_col,
+    decision_col,
+    ret_col,
+    subset_col="event_any_selected",
+):
+    rows = []
+    subset_mask = pred_df[subset_col] > 0
+    subset_n = int(subset_mask.sum())
+    for threshold in np.round(np.arange(0.0, 0.501, 0.025), 3):
+        tmp = pred_df.copy()
+        apply_trade_signal_columns(
+            tmp,
+            edge_col=edge_col,
+            threshold=float(threshold),
+            trade_mode=trade_mode,
+            signal_col=signal_col,
+            decision_col=decision_col,
+            ret_col=ret_col,
+            active_mask=subset_mask,
+        )
+        event_tmp = tmp[subset_mask]
+        metrics = strategy_metrics(event_tmp, signal_col=signal_col, ret_col=ret_col)
+        rows.append(
+            {
+                "trade_edge_threshold": float(threshold),
+                "subset_rows": subset_n,
+                **metrics,
+            }
+        )
+
+    search_df = pd.DataFrame(rows)
+    eligible = search_df[search_df["trade_coverage"] >= min_coverage].copy()
+    if eligible.empty:
+        return 0.0, search_df
+    eligible = eligible.sort_values(
+        ["strategy_total_return_no_cost", "trade_coverage"],
+        ascending=[False, False],
+    )
+    return float(eligible.iloc[0]["trade_edge_threshold"]), search_df
+
+
+def tune_hybrid_strategy(
+    val_pred_df,
+    trade_mode,
+    min_coverage,
+    alpha_grid,
+    rule_score_scale,
+):
+    rows = []
+    subset_mask = val_pred_df["event_any_selected"] > 0
+    subset_n = int(subset_mask.sum())
+    for alpha in alpha_grid:
+        tmp = val_pred_df.copy()
+        tmp["hybrid_edge"] = tmp["direction_edge"] + alpha * (
+            tmp["event_rule_score_sum"] / rule_score_scale
+        )
+        for threshold in np.round(np.arange(0.0, 0.501, 0.025), 3):
+            apply_trade_signal_columns(
+                tmp,
+                edge_col="hybrid_edge",
+                threshold=float(threshold),
+                trade_mode=trade_mode,
+                signal_col="hybrid_trade_signal",
+                decision_col="hybrid_trade_decision",
+                ret_col="hybrid_strategy_ret_no_cost",
+                active_mask=subset_mask,
+            )
+            event_tmp = tmp[subset_mask]
+            metrics = strategy_metrics(
+                event_tmp,
+                signal_col="hybrid_trade_signal",
+                ret_col="hybrid_strategy_ret_no_cost",
+            )
+            rows.append(
+                {
+                    "alpha": float(alpha),
+                    "trade_edge_threshold": float(threshold),
+                    "subset_rows": subset_n,
+                    **metrics,
+                }
+            )
+
+    search_df = pd.DataFrame(rows)
+    eligible = search_df[search_df["trade_coverage"] >= min_coverage].copy()
+    if eligible.empty:
+        return 0.0, 0.0, search_df
+    eligible = eligible.sort_values(
+        ["strategy_total_return_no_cost", "trade_coverage"],
+        ascending=[False, False],
+    )
+    best = eligible.iloc[0]
+    return float(best["alpha"]), float(best["trade_edge_threshold"]), search_df
 
 
 def regime_conditioned_stats(frame, selected_events):
@@ -1514,11 +1710,13 @@ def main():
         min_hit_rate=args.min_hit_rate,
         min_score=args.min_score,
         top_k=args.top_k_events,
+        max_event_jaccard=args.max_event_jaccard,
     )
 
     print(f"Base binary event count: {len(base_event_cols)}")
     print(f"Event + combo count: {combo_df.shape[1]}")
     print(f"Eligible selected events before top-k: {selection_stats['eligible_before_top_k']}")
+    print(f"Deduped overlapping events: {selection_stats['deduped_events']}")
     print(f"Selected events for DL: {len(selected_events)}")
     print("\nTop selected brute-force events:")
     print(selected_df.head(20).to_string(index=False))
@@ -1637,6 +1835,86 @@ def main():
         val_pred_df[col] = marker.reindex(val_target_dates).fillna(0).reset_index(drop=True).to_numpy()
         pred_df[col] = marker.reindex(test_target_dates).fillna(0).reset_index(drop=True).to_numpy()
 
+    val_event_mask = val_pred_df["event_any_selected"] > 0
+    test_event_mask = pred_df["event_any_selected"] > 0
+
+    apply_trade_signal_columns(
+        val_pred_df,
+        edge_col="event_rule_score_sum",
+        threshold=1e-12,
+        trade_mode=args.trade_mode,
+        signal_col="rule_trade_signal",
+        decision_col="rule_trade_decision",
+        ret_col="rule_strategy_ret_no_cost",
+        active_mask=val_event_mask,
+    )
+    apply_trade_signal_columns(
+        pred_df,
+        edge_col="event_rule_score_sum",
+        threshold=1e-12,
+        trade_mode=args.trade_mode,
+        signal_col="rule_trade_signal",
+        decision_col="rule_trade_decision",
+        ret_col="rule_strategy_ret_no_cost",
+        active_mask=test_event_mask,
+    )
+
+    selected_event_day_threshold, event_day_threshold_search_df = tune_edge_threshold_on_subset(
+        pred_df=val_pred_df,
+        edge_col="direction_edge",
+        trade_mode=args.trade_mode,
+        min_coverage=args.min_val_event_trade_coverage,
+        signal_col="event_day_trade_signal",
+        decision_col="event_day_trade_decision",
+        ret_col="event_day_strategy_ret_no_cost",
+    )
+    apply_trade_signal_columns(
+        val_pred_df,
+        edge_col="direction_edge",
+        threshold=selected_event_day_threshold,
+        trade_mode=args.trade_mode,
+        signal_col="event_day_trade_signal",
+        decision_col="event_day_trade_decision",
+        ret_col="event_day_strategy_ret_no_cost",
+        active_mask=val_event_mask,
+    )
+    apply_trade_signal_columns(
+        pred_df,
+        edge_col="direction_edge",
+        threshold=selected_event_day_threshold,
+        trade_mode=args.trade_mode,
+        signal_col="event_day_trade_signal",
+        decision_col="event_day_trade_decision",
+        ret_col="event_day_strategy_ret_no_cost",
+        active_mask=test_event_mask,
+    )
+
+    rule_score_scale = float(val_pred_df.loc[val_event_mask, "event_rule_score_sum"].abs().max())
+    if not np.isfinite(rule_score_scale) or rule_score_scale <= 0:
+        rule_score_scale = 1.0
+    alpha_grid = parse_float_grid(args.hybrid_alpha_grid)
+    selected_hybrid_alpha, selected_hybrid_threshold, hybrid_threshold_search_df = tune_hybrid_strategy(
+        val_pred_df=val_pred_df,
+        trade_mode=args.trade_mode,
+        min_coverage=args.min_val_event_trade_coverage,
+        alpha_grid=alpha_grid,
+        rule_score_scale=rule_score_scale,
+    )
+    for df, mask in [(val_pred_df, val_event_mask), (pred_df, test_event_mask)]:
+        df["hybrid_edge"] = df["direction_edge"] + selected_hybrid_alpha * (
+            df["event_rule_score_sum"] / rule_score_scale
+        )
+        apply_trade_signal_columns(
+            df,
+            edge_col="hybrid_edge",
+            threshold=selected_hybrid_threshold,
+            trade_mode=args.trade_mode,
+            signal_col="hybrid_trade_signal",
+            decision_col="hybrid_trade_decision",
+            ret_col="hybrid_strategy_ret_no_cost",
+            active_mask=mask,
+        )
+
     y_true = pred_df["actual_label"].to_numpy()
     y_pred = pred_df["pred_label"].to_numpy()
     report = classification_report(
@@ -1654,6 +1932,14 @@ def main():
     history.to_csv(output_dir / "training_history.csv", index=False)
     val_pred_df.to_csv(output_dir / "validation_predictions.csv", index=False)
     threshold_search_df.to_csv(output_dir / "validation_trade_threshold_search.csv", index=False)
+    event_day_threshold_search_df.to_csv(
+        output_dir / "validation_event_day_threshold_search.csv",
+        index=False,
+    )
+    hybrid_threshold_search_df.to_csv(
+        output_dir / "validation_hybrid_threshold_search.csv",
+        index=False,
+    )
     pred_df.to_csv(output_dir / "test_predictions.csv", index=False)
     val_event_pred_df = val_pred_df[val_pred_df.get("event_any_selected", 0) > 0].copy()
     test_event_pred_df = pred_df[pred_df.get("event_any_selected", 0) > 0].copy()
@@ -1690,8 +1976,14 @@ def main():
         "trade_mode": args.trade_mode,
         "trade_edge_threshold": args.trade_edge_threshold,
         "selected_trade_edge_threshold": selected_trade_edge_threshold,
+        "selected_event_day_trade_edge_threshold": selected_event_day_threshold,
+        "selected_hybrid_alpha": selected_hybrid_alpha,
+        "selected_hybrid_trade_edge_threshold": selected_hybrid_threshold,
+        "hybrid_rule_score_scale": rule_score_scale,
+        "hybrid_alpha_grid": alpha_grid,
         "auto_trade_threshold": args.auto_trade_threshold,
         "min_val_trade_coverage": args.min_val_trade_coverage,
+        "min_val_event_trade_coverage": args.min_val_event_trade_coverage,
         "use_class_weights": args.use_class_weights,
         "device": device,
         "rows": {
@@ -1713,6 +2005,21 @@ def main():
         "event_selection": selection_stats,
         "validation_strategy": strategy_metrics(val_pred_df),
         "validation_event_days": event_days_only_metrics(val_pred_df),
+        "validation_rule_event_days": event_days_only_metrics(
+            val_pred_df,
+            signal_col="rule_trade_signal",
+            ret_col="rule_strategy_ret_no_cost",
+        ),
+        "validation_model_event_day_threshold": event_days_only_metrics(
+            val_pred_df,
+            signal_col="event_day_trade_signal",
+            ret_col="event_day_strategy_ret_no_cost",
+        ),
+        "validation_hybrid_event_days": event_days_only_metrics(
+            val_pred_df,
+            signal_col="hybrid_trade_signal",
+            ret_col="hybrid_strategy_ret_no_cost",
+        ),
         "test": {
             "loss": test_metrics["loss"],
             "accuracy": test_metrics["acc"],
@@ -1720,6 +2027,21 @@ def main():
             **strategy_metrics(pred_df),
         },
         "test_event_days": event_days_only_metrics(pred_df),
+        "test_rule_event_days": event_days_only_metrics(
+            pred_df,
+            signal_col="rule_trade_signal",
+            ret_col="rule_strategy_ret_no_cost",
+        ),
+        "test_model_event_day_threshold": event_days_only_metrics(
+            pred_df,
+            signal_col="event_day_trade_signal",
+            ret_col="event_day_strategy_ret_no_cost",
+        ),
+        "test_hybrid_event_days": event_days_only_metrics(
+            pred_df,
+            signal_col="hybrid_trade_signal",
+            ret_col="hybrid_strategy_ret_no_cost",
+        ),
         "classification_report": report,
         "confusion_matrix_labels": [DIRECTION_LABELS[i] for i in DIRECTION_LABELS],
         "confusion_matrix": cm.tolist(),
@@ -1753,6 +2075,24 @@ def main():
         f"acc={summary['test_event_days']['accuracy']:.4f} "
         f"trades={summary['test_event_days']['trade_count']} "
         f"total={summary['test_event_days']['strategy_total_return_no_cost']:.4f}"
+    )
+    print(
+        "Event rule baseline: "
+        f"trades={summary['test_rule_event_days']['trade_count']} "
+        f"total={summary['test_rule_event_days']['strategy_total_return_no_cost']:.4f}"
+    )
+    print(
+        "Event-day threshold: "
+        f"threshold={selected_event_day_threshold:.3f} "
+        f"trades={summary['test_model_event_day_threshold']['trade_count']} "
+        f"total={summary['test_model_event_day_threshold']['strategy_total_return_no_cost']:.4f}"
+    )
+    print(
+        "Hybrid event-days: "
+        f"alpha={selected_hybrid_alpha:.3f} "
+        f"threshold={selected_hybrid_threshold:.3f} "
+        f"trades={summary['test_hybrid_event_days']['trade_count']} "
+        f"total={summary['test_hybrid_event_days']['strategy_total_return_no_cost']:.4f}"
     )
     print("Confusion matrix rows=true, cols=pred [down, up]:")
     print(cm)
