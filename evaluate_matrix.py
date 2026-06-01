@@ -52,6 +52,7 @@ BASE_CMD = [
     "--binary-threshold", "0.0",
     "--auto-trade-threshold",
     "--trade-mode", "long_short",   # 開啟雙向交易
+    "--min-score", "0.03",
     "--epochs", "80",
     "--batch-size", "64"
 ]

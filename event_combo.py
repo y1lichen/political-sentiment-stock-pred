@@ -91,6 +91,15 @@ def parse_args():
     parser.add_argument("--min-n", type=int, default=20, help="Minimum samples for a brute-force event combo.")
     parser.add_argument("--min-abs-mean-ret", type=float, default=0.001, help="Minimum absolute mean return.")
     parser.add_argument("--min-hit-rate", type=float, default=0.55, help="Minimum directional hit rate.")
+    parser.add_argument(
+        "--min-score",
+        type=float,
+        default=0.03,
+        help=(
+            "Minimum brute-force event score before top-k truncation. "
+            "Score = abs(mean_ret) * sqrt(n) * directional_hit."
+        ),
+    )
     parser.add_argument("--top-k-events", type=int, default=80, help="Max brute-force event combos used by DL.")
     parser.add_argument("--epochs", type=int, default=40)
     parser.add_argument("--batch-size", type=int, default=64)
@@ -686,7 +695,7 @@ def make_event_combos(event_df, max_combo_size=2):
     return combo_df, event_cols
 
 
-def brute_force_events(combo_df, price, hold, min_n, min_abs_mean_ret, min_hit_rate, top_k):
+def brute_force_events(combo_df, price, hold, min_n, min_abs_mean_ret, min_hit_rate, min_score, top_k):
     future_ret = price.shift(-hold) / price - 1
     data = combo_df.join(future_ret.rename("future_ret"), how="inner")
 
@@ -723,7 +732,11 @@ def brute_force_events(combo_df, price, hold, min_n, min_abs_mean_ret, min_hit_r
         }
         rows.append(row)
 
-        if abs(mean_ret) >= min_abs_mean_ret and directional_hit >= min_hit_rate:
+        if (
+            abs(mean_ret) >= min_abs_mean_ret
+            and directional_hit >= min_hit_rate
+            and score >= min_score
+        ):
             selected.append(row)
 
     result_df = pd.DataFrame(rows)
@@ -732,12 +745,28 @@ def brute_force_events(combo_df, price, hold, min_n, min_abs_mean_ret, min_hit_r
 
     result_df = result_df.sort_values("score", ascending=False).reset_index(drop=True)
     selected_df = pd.DataFrame(selected).sort_values("score", ascending=False)
+    selected_before_top_k = int(len(selected_df))
     if selected_df.empty:
-        selected_df = result_df.head(top_k).copy()
+        fallback = result_df[
+            (result_df["score"] >= min_score)
+            & (result_df["directional_hit"] >= min_hit_rate)
+        ].copy()
+        if fallback.empty:
+            fallback = result_df.head(min(top_k, 20)).copy()
+        selected_df = fallback.head(top_k).copy()
     else:
         selected_df = selected_df.head(top_k).copy()
 
-    return selected_df["event"].tolist(), result_df, selected_df
+    selection_stats = {
+        "eligible_before_top_k": selected_before_top_k,
+        "selected_after_top_k": int(len(selected_df)),
+        "top_k_events": int(top_k),
+        "min_n": int(min_n),
+        "min_abs_mean_ret": float(min_abs_mean_ret),
+        "min_hit_rate": float(min_hit_rate),
+        "min_score": float(min_score),
+    }
+    return selected_df["event"].tolist(), result_df, selected_df, selection_stats
 
 
 def add_institution_features(base, path, target):
@@ -1379,18 +1408,20 @@ def main():
     # 用去 stale 後的價格選事件,避免假日的假 0 報酬汙染 brute-force 篩選。
     price = real_price_series(price_df, args.target)
     combo_df, base_event_cols = make_event_combos(event_df)
-    selected_events, brute_df, selected_df = brute_force_events(
+    selected_events, brute_df, selected_df, selection_stats = brute_force_events(
         combo_df=combo_df,
         price=price,
         hold=args.hold,
         min_n=args.min_n,
         min_abs_mean_ret=args.min_abs_mean_ret,
         min_hit_rate=args.min_hit_rate,
+        min_score=args.min_score,
         top_k=args.top_k_events,
     )
 
     print(f"Base binary event count: {len(base_event_cols)}")
     print(f"Event + combo count: {combo_df.shape[1]}")
+    print(f"Eligible selected events before top-k: {selection_stats['eligible_before_top_k']}")
     print(f"Selected events for DL: {len(selected_events)}")
     print("\nTop selected brute-force events:")
     print(selected_df.head(20).to_string(index=False))
@@ -1561,6 +1592,7 @@ def main():
             "event_regime": len(all_event_cols),
             "selected_events": len(selected_events),
         },
+        "event_selection": selection_stats,
         "validation_strategy": strategy_metrics(val_pred_df),
         "test": {
             "loss": test_metrics["loss"],
