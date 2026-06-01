@@ -1481,6 +1481,12 @@ def event_days_only_metrics(pred_df, signal_col="trade_signal", ret_col="strateg
             "event_coverage": 0.0,
             "accuracy": 0.0,
             "macro_f1": 0.0,
+            "up_precision": 0.0,
+            "up_recall": 0.0,
+            "up_f1": 0.0,
+            "down_precision": 0.0,
+            "down_recall": 0.0,
+            "down_f1": 0.0,
             "precision": 0.0,
             "recall": 0.0,
             "auc": 0.5,
@@ -1493,6 +1499,14 @@ def event_days_only_metrics(pred_df, signal_col="trade_signal", ret_col="strateg
     actual = event_df["actual_label"].astype(int)
     pred = event_df["pred_label"].astype(int)
     prob_up = event_df["prob_up"].astype(float)
+    report = classification_report(
+        actual,
+        pred,
+        labels=[0, 1],
+        target_names=["down", "up"],
+        zero_division=0,
+        output_dict=True,
+    )
     try:
         auc = roc_auc_score(actual, prob_up)
     except ValueError:
@@ -1510,8 +1524,14 @@ def event_days_only_metrics(pred_df, signal_col="trade_signal", ret_col="strateg
         "event_coverage": float(len(event_df) / max(len(pred_df), 1)),
         "accuracy": accuracy_score(actual, pred),
         "macro_f1": f1_score(actual, pred, average="macro", zero_division=0),
-        "precision": precision_score(actual, pred, pos_label=1, zero_division=0),
-        "recall": recall_score(actual, pred, pos_label=1, zero_division=0),
+        "up_precision": float(report["up"]["precision"]),
+        "up_recall": float(report["up"]["recall"]),
+        "up_f1": float(report["up"]["f1-score"]),
+        "down_precision": float(report["down"]["precision"]),
+        "down_recall": float(report["down"]["recall"]),
+        "down_f1": float(report["down"]["f1-score"]),
+        "precision": float(report["up"]["precision"]),
+        "recall": float(report["up"]["recall"]),
         "auc": float(auc),
         "trade_accuracy": trade_accuracy,
         "trade_count": int(len(traded)),
