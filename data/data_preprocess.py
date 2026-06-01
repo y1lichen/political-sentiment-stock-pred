@@ -4,6 +4,7 @@ import pandas as pd
 
 
 INPUT_FILE = "./data/text/trump_posts_features_2017_2026.csv"
+PRICE_FILE = "./data/taiwan_market_data/global_prices.csv"
 POST_OUTPUT = "./data/output/trump_posts_with_event_features.csv"
 DAILY_OUTPUT = "./data/output/trump_daily_binary_event_features.csv"
 POST_OUTPUT_US = "./data/output/trump_posts_with_event_features_us.csv"
@@ -17,7 +18,42 @@ def contains_any(text, words):
     return int(any(w in text for w in words))
 
 
-def add_post_level_features(df, market="us"):
+def load_trading_calendar(market):
+    try:
+        price_df = pd.read_csv(PRICE_FILE)
+    except FileNotFoundError:
+        return None
+
+    price_df["Date"] = pd.to_datetime(price_df["Date"]).dt.normalize()
+    candidates = ["^GSPC", "TSM"] if market == "us" else ["0050.TW", "2330.TW"]
+    ticker = next((c for c in candidates if c in price_df.columns), None)
+    if ticker is None:
+        return None
+
+    series = price_df[["Date", ticker]].dropna().copy()
+    # global_prices 用 ffill 對齊不同市場日曆; diff==0 多半是休市 carry-forward。
+    real_trade = series[ticker].diff().fillna(1) != 0
+    calendar = series.loc[real_trade, "Date"].drop_duplicates().sort_values()
+    return calendar.reset_index(drop=True)
+
+
+def map_to_next_trading_day(dates, trading_calendar):
+    dates = pd.to_datetime(dates).dt.normalize()
+    if trading_calendar is None or len(trading_calendar) == 0:
+        return dates
+
+    calendar = pd.to_datetime(trading_calendar).dt.normalize().sort_values().to_numpy()
+    mapped = []
+    for value in dates.to_numpy():
+        if pd.isna(value):
+            mapped.append(pd.NaT)
+            continue
+        pos = np.searchsorted(calendar, value, side="left")
+        mapped.append(pd.NaT if pos >= len(calendar) else pd.Timestamp(calendar[pos]))
+    return pd.Series(mapped, index=dates.index)
+
+
+def add_post_level_features(df, market="us", trading_calendar=None):
     df = df.copy()
 
     df["Timestamp"] = pd.to_datetime(df["Timestamp"], utc=True, errors="coerce")
@@ -33,9 +69,14 @@ def add_post_level_features(df, market="us"):
         close_hour, close_minute = 16, 0
 
     df["Timestamp_Local"] = df["Timestamp"].dt.tz_convert(local_tz)
-    df["trump_date"] = df["Timestamp_Local"].dt.date
     df["hour_local"] = df["Timestamp_Local"].dt.hour
     df["minute_local"] = df["Timestamp_Local"].dt.minute
+    local_date = df["Timestamp_Local"].dt.tz_localize(None).dt.normalize()
+    # 嚴格時間對齊: 不論美股或台股，Trump 貼文都只影響下一個有效交易日。
+    # 這避免同日盤中/盤前資訊被放進 close_t -> close_t+1 的訊號日。
+    raw_effective_date = local_date + pd.Timedelta(days=1)
+    effective_date = map_to_next_trading_day(raw_effective_date, trading_calendar)
+    df["trump_date"] = effective_date.dt.date
 
     df["Content"] = df["Content"].astype(str)
     lower = df["Content"].str.lower()
@@ -73,7 +114,7 @@ def add_post_level_features(df, market="us"):
 
     # trump_code 類別事件
     df["ev_tariff"] = (
-        lower.str.contains(r"\btariffs?\b|\bdut(y|ies)\b", regex=True) |
+        lower.str.contains(r"\btariffs?\b|\bdut(?:y|ies)\b", regex=True) |
         (df.get("kw_tariffs", 0) == 1)
     ).astype(int)
 
@@ -314,12 +355,14 @@ def build_daily_binary_features(post_df):
 
 def main():
     df = pd.read_csv(INPUT_FILE)
+    us_calendar = load_trading_calendar("us")
+    tw_calendar = load_trading_calendar("tw")
 
-    post_df = add_post_level_features(df, market="us")
+    post_df = add_post_level_features(df, market="us", trading_calendar=us_calendar)
     daily_df = build_daily_binary_features(post_df)
     post_df_us = post_df
     daily_df_us = daily_df
-    post_df_tw = add_post_level_features(df, market="tw")
+    post_df_tw = add_post_level_features(df, market="tw", trading_calendar=tw_calendar)
     daily_df_tw = build_daily_binary_features(post_df_tw)
 
     post_df.to_csv(POST_OUTPUT, index=False)
