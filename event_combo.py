@@ -159,9 +159,23 @@ def read_price_data(path, target):
 
 
 def event_path_for_target(target):
-    """依標的所在市場挑事件特徵 CSV:台股 (.TW) 用台北時區那份,其餘 (美股) 用美東那份。"""
+    """依標的所在市場挑事件特徵 CSV, 若分市場檔不存在則回退到共用事件檔。"""
     suffix = "tw" if target.endswith(".TW") else "us"
-    return f"data/output/trump_daily_binary_event_features_{suffix}.csv"
+    market_path = Path(f"data/output/trump_daily_binary_event_features_{suffix}.csv")
+    if market_path.exists():
+        return str(market_path)
+
+    fallback_path = Path("data/output/trump_daily_binary_event_features.csv")
+    if fallback_path.exists():
+        print(
+            f"Warning: {market_path} not found; using fallback event features: {fallback_path}"
+        )
+        return str(fallback_path)
+
+    raise FileNotFoundError(
+        "No Trump daily event feature file found. Expected either "
+        f"{market_path} or {fallback_path}. Run `python data/data_preprocess.py` first."
+    )
 
 
 def read_event_data(path):

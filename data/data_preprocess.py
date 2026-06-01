@@ -6,6 +6,10 @@ import pandas as pd
 INPUT_FILE = "./data/text/trump_posts_features_2017_2026.csv"
 POST_OUTPUT = "./data/output/trump_posts_with_event_features.csv"
 DAILY_OUTPUT = "./data/output/trump_daily_binary_event_features.csv"
+POST_OUTPUT_US = "./data/output/trump_posts_with_event_features_us.csv"
+DAILY_OUTPUT_US = "./data/output/trump_daily_binary_event_features_us.csv"
+POST_OUTPUT_TW = "./data/output/trump_posts_with_event_features_tw.csv"
+DAILY_OUTPUT_TW = "./data/output/trump_daily_binary_event_features_tw.csv"
 
 
 def contains_any(text, words):
@@ -13,34 +17,48 @@ def contains_any(text, words):
     return int(any(w in text for w in words))
 
 
-def add_post_level_features(df):
+def add_post_level_features(df, market="us"):
     df = df.copy()
 
     df["Timestamp"] = pd.to_datetime(df["Timestamp"], utc=True, errors="coerce")
     df = df.dropna(subset=["Timestamp"])
 
-    # trump_code 主要用美東時間判斷盤前、盤中、深夜
-    df["Timestamp_ET"] = df["Timestamp"].dt.tz_convert("America/New_York")
-    df["trump_date"] = df["Timestamp_ET"].dt.date
-    df["hour_et"] = df["Timestamp_ET"].dt.hour
-    df["minute_et"] = df["Timestamp_ET"].dt.minute
+    if market == "tw":
+        local_tz = "Asia/Taipei"
+        open_hour, open_minute = 9, 0
+        close_hour, close_minute = 13, 30
+    else:
+        local_tz = "America/New_York"
+        open_hour, open_minute = 9, 30
+        close_hour, close_minute = 16, 0
+
+    df["Timestamp_Local"] = df["Timestamp"].dt.tz_convert(local_tz)
+    df["trump_date"] = df["Timestamp_Local"].dt.date
+    df["hour_local"] = df["Timestamp_Local"].dt.hour
+    df["minute_local"] = df["Timestamp_Local"].dt.minute
 
     df["Content"] = df["Content"].astype(str)
     lower = df["Content"].str.lower()
 
     # 時間事件
     df["is_pre_market_post"] = (
-        (df["hour_et"] < 9) |
-        ((df["hour_et"] == 9) & (df["minute_et"] < 30))
+        (df["hour_local"] < open_hour) |
+        ((df["hour_local"] == open_hour) & (df["minute_local"] < open_minute))
     ).astype(int)
 
     df["is_market_open_post"] = (
-        ((df["hour_et"] > 9) | ((df["hour_et"] == 9) & (df["minute_et"] >= 30))) &
-        (df["hour_et"] < 16)
+        (
+            (df["hour_local"] > open_hour) |
+            ((df["hour_local"] == open_hour) & (df["minute_local"] >= open_minute))
+        ) &
+        (
+            (df["hour_local"] < close_hour) |
+            ((df["hour_local"] == close_hour) & (df["minute_local"] < close_minute))
+        )
     ).astype(int)
 
     df["is_night_post"] = (
-        (df["hour_et"] < 5) | (df["hour_et"] >= 23)
+        (df["hour_local"] < 5) | (df["hour_local"] >= 23)
     ).astype(int)
 
     # 文字型態
@@ -297,11 +315,19 @@ def build_daily_binary_features(post_df):
 def main():
     df = pd.read_csv(INPUT_FILE)
 
-    post_df = add_post_level_features(df)
+    post_df = add_post_level_features(df, market="us")
     daily_df = build_daily_binary_features(post_df)
+    post_df_us = post_df
+    daily_df_us = daily_df
+    post_df_tw = add_post_level_features(df, market="tw")
+    daily_df_tw = build_daily_binary_features(post_df_tw)
 
     post_df.to_csv(POST_OUTPUT, index=False)
     daily_df.to_csv(DAILY_OUTPUT, index=False)
+    post_df_us.to_csv(POST_OUTPUT_US, index=False)
+    daily_df_us.to_csv(DAILY_OUTPUT_US, index=False)
+    post_df_tw.to_csv(POST_OUTPUT_TW, index=False)
+    daily_df_tw.to_csv(DAILY_OUTPUT_TW, index=False)
 
     binary_cols = [
         c for c in daily_df.columns
@@ -315,7 +341,12 @@ def main():
 
     print(f"Saved post-level features to: {POST_OUTPUT}")
     print(f"Saved daily binary event features to: {DAILY_OUTPUT}")
+    print(f"Saved US post-level features to: {POST_OUTPUT_US}")
+    print(f"Saved US daily binary event features to: {DAILY_OUTPUT_US}")
+    print(f"Saved TW post-level features to: {POST_OUTPUT_TW}")
+    print(f"Saved TW daily binary event features to: {DAILY_OUTPUT_TW}")
     print(f"Daily rows: {len(daily_df)}")
+    print(f"TW daily rows: {len(daily_df_tw)}")
     print(f"Binary event feature count: {len(binary_cols)}")
     print("\nTop event frequencies:")
     print(daily_df[binary_cols].sum().sort_values(ascending=False).head(30))
