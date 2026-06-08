@@ -1,6 +1,7 @@
 import os
 import subprocess
 import json
+import argparse
 import pandas as pd
 import numpy as np
 from sklearn.metrics import (
@@ -35,28 +36,90 @@ TARGETS = [
     "3711.TW",   # 日月光投控
 ]
 
-STRATEGY_NAME = "full_event_market_gated_mlp"
-BASELINE_STRATEGY_NAME = "market_only_gated_mlp"
 OUTPUT_CSV_NAME = "my_model_vs_baseline_all_markets.csv"
+DEFAULT_HORIZONS = "3:1,5:1,10:3,20:5,20:10,60:20"
 
 EVENT_FEATURE_FILES = [
     "data/output/trump_posts_with_event_features_us.csv",
     "data/output/trump_posts_with_event_features_tw.csv",
 ]
 
-# 你的 Gated MLP 啟動指令 (使用最好的設定)
 BASE_CMD = [
-    "python", "event_combo.py",
-    "--hold", "1",
     "--presidential-terms-only",
-    "--model-type", "gated_mlp",    
     "--binary-threshold", "0.0",
     "--auto-trade-threshold",
     "--trade-mode", "long_short",   # 開啟雙向交易
     "--min-score", "0.03",
-    "--epochs", "80",
-    "--batch-size", "64"
 ]
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description=(
+            "Run full event+market vs market-only baseline across targets and "
+            "multiple lookback/holding horizons."
+        )
+    )
+    parser.add_argument(
+        "--horizons",
+        default=DEFAULT_HORIZONS,
+        help=(
+            "Comma-separated window:hold pairs. Example: '3:1,20:10'. "
+            "Default tests short, medium, and longer event horizons."
+        ),
+    )
+    parser.add_argument(
+        "--model-type",
+        choices=["lstm", "gated_mlp"],
+        default="lstm",
+        help=(
+            "Use lstm for true N-day lookback sequences. gated_mlp is faster, "
+            "but --window only affects split overlap."
+        ),
+    )
+    parser.add_argument("--epochs", type=int, default=80)
+    parser.add_argument("--batch-size", type=int, default=64)
+    parser.add_argument("--output-csv", default=OUTPUT_CSV_NAME)
+    parser.add_argument("--output-root", default="data/output/run_all_compare")
+    parser.add_argument(
+        "--targets",
+        default=",".join(TARGETS),
+        help="Comma-separated targets to run. Defaults to all configured TW/US targets.",
+    )
+    parser.add_argument(
+        "--python-bin",
+        default="python",
+        help="Python executable used to launch event_combo.py on the server.",
+    )
+    return parser.parse_args()
+
+
+def parse_horizons(text):
+    horizons = []
+    for raw in text.split(","):
+        raw = raw.strip()
+        if not raw:
+            continue
+        parts = raw.split(":")
+        if len(parts) != 2:
+            raise ValueError(f"Invalid horizon spec {raw!r}; expected window:hold, e.g. 20:10.")
+        window, hold = [int(x) for x in parts]
+        if window <= 0 or hold <= 0:
+            raise ValueError(f"Invalid horizon spec {raw!r}; window and hold must be positive.")
+        if hold > window:
+            print(
+                f"Warning: horizon {window}:{hold} has hold > window. "
+                "This is allowed, but usually harder to model."
+            )
+        horizons.append({"window": window, "hold": hold, "horizon": f"{window}d_to_{hold}d"})
+    if not horizons:
+        raise ValueError("No valid horizons were provided.")
+    return horizons
+
+
+def parse_targets(text):
+    targets = [x.strip() for x in text.split(",") if x.strip()]
+    return targets or TARGETS
 
 
 def ensure_event_features():
@@ -70,14 +133,15 @@ def total_return(returns):
     returns = pd.Series(returns).fillna(0.0)
     return float((1.0 + returns).prod() - 1.0)
 
-def sharpe_like(returns):
+def sharpe_like(returns, hold=1):
     returns = pd.Series(returns).fillna(0.0)
     std = returns.std(ddof=1)
     if std == 0 or np.isnan(std):
         return 0.0
-    return float(np.sqrt(252) * returns.mean() / std)
+    periods_per_year = 252 / max(int(hold), 1)
+    return float(np.sqrt(periods_per_year) * returns.mean() / std)
 
-def prediction_metrics(pred_path):
+def prediction_metrics(pred_path, hold=1):
     df = pd.read_csv(pred_path)
 
     actual = df["actual_label"].astype(int).to_numpy()
@@ -96,7 +160,7 @@ def prediction_metrics(pred_path):
         auc = 0.5
 
     cumret = total_return(strategy_ret)
-    sharpe = sharpe_like(strategy_ret)
+    sharpe = sharpe_like(strategy_ret, hold=hold)
 
     return {
         "macro_f1": macro_f1,
@@ -110,10 +174,10 @@ def prediction_metrics(pred_path):
     }
 
 
-def calculate_metrics(target, full_pred_path, baseline_pred_path):
+def calculate_metrics(target, full_pred_path, baseline_pred_path, window, hold, model_type):
     """計算 full event+market model 與 market-only model baseline 的差異。"""
-    full = prediction_metrics(full_pred_path)
-    baseline = prediction_metrics(baseline_pred_path)
+    full = prediction_metrics(full_pred_path, hold=hold)
+    baseline = prediction_metrics(baseline_pred_path, hold=hold)
     full_event_days = summary_event_days(os.path.join(os.path.dirname(full_pred_path), "summary.json"))
     baseline_event_days = summary_event_days(os.path.join(os.path.dirname(baseline_pred_path), "summary.json"))
     full_rule_event_days = summary_event_days(
@@ -130,9 +194,13 @@ def calculate_metrics(target, full_pred_path, baseline_pred_path):
     )
 
     return {
+        "window": window,
+        "hold": hold,
+        "horizon": f"{window}d_to_{hold}d",
+        "model_type": model_type,
         "target": target,
-        "strategy": STRATEGY_NAME,
-        "baseline": BASELINE_STRATEGY_NAME,
+        "strategy": f"full_event_market_{model_type}",
+        "baseline": f"market_only_{model_type}",
         "macro_f1": full["macro_f1"],
         "d_macro_f1": full["macro_f1"] - baseline["macro_f1"],
         "precision": full["precision"],
@@ -249,57 +317,97 @@ def summary_event_days(summary_path, key="test_event_days"):
     return {**defaults, **data.get(key, {})}
 
 def main():
+    args = parse_args()
+    horizons = parse_horizons(args.horizons)
+    targets = parse_targets(args.targets)
     ensure_event_features()
     results = []
-    
-    for target in TARGETS:
-        print(f"\n{'-'*50}")
-        print(f"🚀 開始訓練 full model 與 market-only baseline: {target}")
-        print(f"{'-'*50}")
-        
-        target_out_dir = f"data/output/run_all_compare/{target}"
-        full_out_dir = os.path.join(target_out_dir, "full")
-        baseline_out_dir = os.path.join(target_out_dir, "market_only")
-        os.makedirs(full_out_dir, exist_ok=True)
-        os.makedirs(baseline_out_dir, exist_ok=True)
-        
-        full_cmd = BASE_CMD + [
-            "--target", target,
-            "--feature-set", "full",
-            "--output-dir", full_out_dir,
-        ]
-        baseline_cmd = BASE_CMD + [
-            "--target", target,
-            "--feature-set", "market_only",
-            "--output-dir", baseline_out_dir,
-        ]
-        
-        try:
-            subprocess.run(full_cmd, check=True)
-            subprocess.run(baseline_cmd, check=True)
-            
-            full_pred_path = os.path.join(full_out_dir, "test_predictions.csv")
-            baseline_pred_path = os.path.join(baseline_out_dir, "test_predictions.csv")
-            if os.path.exists(full_pred_path) and os.path.exists(baseline_pred_path):
-                target_metrics = calculate_metrics(target, full_pred_path, baseline_pred_path)
-                results.append(target_metrics)
-                print(
-                    f"✅ {target} 完成! "
-                    f"Accuracy: {target_metrics['accuracy']:.4f} "
-                    f"(d={target_metrics['d_accuracy']:+.4f}), "
-                    f"CumRet: {target_metrics['cumret']:.4f} "
-                    f"(d={target_metrics['d_cumret']:+.4f})"
-                )
-            else:
-                print(f"❌ 找不到預測檔: {full_pred_path} 或 {baseline_pred_path}")
-                
-        except subprocess.CalledProcessError as e:
-            print(f"❌ 訓練 {target} 失敗: {e}")
-            continue
+
+    print("Horizon settings:")
+    for h in horizons:
+        print(f"  - window={h['window']} days -> hold={h['hold']} days ({h['horizon']})")
+    print(f"Model type: {args.model_type}")
+
+    for horizon_cfg in horizons:
+        window = horizon_cfg["window"]
+        hold = horizon_cfg["hold"]
+        horizon_name = horizon_cfg["horizon"]
+        horizon_results = []
+
+        for target in targets:
+            print(f"\n{'-'*70}")
+            print(
+                f"🚀 開始訓練: {target} | window={window}d -> hold={hold}d | "
+                f"model={args.model_type}"
+            )
+            print(f"{'-'*70}")
+
+            target_out_dir = os.path.join(args.output_root, horizon_name, target)
+            full_out_dir = os.path.join(target_out_dir, "full")
+            baseline_out_dir = os.path.join(target_out_dir, "market_only")
+            os.makedirs(full_out_dir, exist_ok=True)
+            os.makedirs(baseline_out_dir, exist_ok=True)
+
+            common_cmd = [
+                args.python_bin,
+                "event_combo.py",
+                *BASE_CMD,
+                "--hold", str(hold),
+                "--window", str(window),
+                "--model-type", args.model_type,
+                "--epochs", str(args.epochs),
+                "--batch-size", str(args.batch_size),
+                "--target", target,
+            ]
+            full_cmd = common_cmd + [
+                "--feature-set", "full",
+                "--output-dir", full_out_dir,
+            ]
+            baseline_cmd = common_cmd + [
+                "--feature-set", "market_only",
+                "--output-dir", baseline_out_dir,
+            ]
+
+            try:
+                subprocess.run(full_cmd, check=True)
+                subprocess.run(baseline_cmd, check=True)
+
+                full_pred_path = os.path.join(full_out_dir, "test_predictions.csv")
+                baseline_pred_path = os.path.join(baseline_out_dir, "test_predictions.csv")
+                if os.path.exists(full_pred_path) and os.path.exists(baseline_pred_path):
+                    target_metrics = calculate_metrics(
+                        target,
+                        full_pred_path,
+                        baseline_pred_path,
+                        window=window,
+                        hold=hold,
+                        model_type=args.model_type,
+                    )
+                    results.append(target_metrics)
+                    horizon_results.append(target_metrics)
+                    print(
+                        f"✅ {target} 完成! "
+                        f"Accuracy: {target_metrics['accuracy']:.4f} "
+                        f"(d={target_metrics['d_accuracy']:+.4f}), "
+                        f"CumRet: {target_metrics['cumret']:.4f} "
+                        f"(d={target_metrics['d_cumret']:+.4f})"
+                    )
+                else:
+                    print(f"❌ 找不到預測檔: {full_pred_path} 或 {baseline_pred_path}")
+
+            except subprocess.CalledProcessError as e:
+                print(f"❌ 訓練 {target} 失敗: {e}")
+                continue
+
+        if horizon_results:
+            horizon_path = args.output_csv.replace(".csv", f"_{horizon_name}.csv")
+            pd.DataFrame(horizon_results).sort_values(by="target").to_csv(horizon_path, index=False)
+            print(f"📄 已輸出 horizon 子表: {horizon_path}")
 
     if results:
-        # 強制與同學報表的欄位順序一模一樣
+        # Keep horizon metadata first, followed by the original model-vs-baseline metrics.
         columns_order = [
+            'window', 'hold', 'horizon', 'model_type',
             'target', 'strategy', 'baseline', 'macro_f1', 'd_macro_f1', 'precision', 'd_precision',
             'recall', 'd_recall', 'accuracy', 'd_accuracy', 'auc', 'd_auc', 
             'sharpe', 'd_sharpe', 'cumret', 'd_cumret', 'trades', 'd_trades',
@@ -339,14 +447,45 @@ def main():
         
         df_results = pd.DataFrame(results)[columns_order]
         # 為了視覺上好對齊，我們把美股和台股照名字排序
-        df_results = df_results.sort_values(by='target')
+        df_results = df_results.sort_values(by=['window', 'hold', 'target'])
         
-        df_results.to_csv(OUTPUT_CSV_NAME, index=False)
-        print(f"\n🎉 評估完成！請查看跨市場報表: {OUTPUT_CSV_NAME}")
+        df_results.to_csv(args.output_csv, index=False)
+        print(f"\n🎉 評估完成！請查看跨市場報表: {args.output_csv}")
+
+        horizon_summary_cols = [
+            "accuracy",
+            "d_accuracy",
+            "macro_f1",
+            "d_macro_f1",
+            "auc",
+            "d_auc",
+            "sharpe",
+            "d_sharpe",
+            "cumret",
+            "d_cumret",
+            "event_days_accuracy",
+            "d_event_days_accuracy",
+            "event_days_cumret",
+            "d_event_days_cumret",
+            "hybrid_event_days_cumret",
+            "event_day_threshold_cumret",
+        ]
+        horizon_summary = (
+            df_results.groupby(["window", "hold", "horizon", "model_type"], as_index=False)[horizon_summary_cols]
+            .mean()
+            .sort_values(["window", "hold"])
+        )
+        summary_path = args.output_csv.replace(".csv", "_horizon_summary.csv")
+        horizon_summary.to_csv(summary_path, index=False)
+        print(f"📄 Horizon 平均表: {summary_path}")
         
         # 用 to_string() 避免 tabulate 報錯
         print("\n📊 你的模型表現 (依 CumRet 排序):")
-        print(df_results.sort_values(by='cumret', ascending=False)[['target', 'accuracy', 'd_accuracy', 'sharpe', 'cumret', 'd_cumret']].head(10).to_string(index=False))
+        print(
+            df_results.sort_values(by='cumret', ascending=False)[
+                ['horizon', 'target', 'accuracy', 'd_accuracy', 'sharpe', 'cumret', 'd_cumret']
+            ].head(10).to_string(index=False)
+        )
     else:
         print("\n⚠️ 執行失敗，未產生結果。")
 

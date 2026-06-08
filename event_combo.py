@@ -846,6 +846,7 @@ def add_signed_event_features(frame, selected_df):
     signal_sum = pd.Series(0.0, index=out.index)
     score_sum = pd.Series(0.0, index=out.index)
     any_selected = pd.Series(0.0, index=out.index)
+    new_cols = {}
 
     for row in selected_df.itertuples(index=False):
         event_col = row.event
@@ -856,18 +857,22 @@ def add_signed_event_features(frame, selected_df):
         signed_col = f"{event_col}__signed"
         weighted_col = f"{event_col}__signed_score"
         active = (out[event_col].fillna(0) > 0).astype(float)
-        out[signed_col] = active * direction_sign
-        out[weighted_col] = active * direction_sign * score
+        signed_values = active * direction_sign
+        weighted_values = signed_values * score
+        new_cols[signed_col] = signed_values
+        new_cols[weighted_col] = weighted_values
         signed_cols.append(signed_col)
         weighted_cols.append(weighted_col)
-        signal_sum = signal_sum + out[signed_col]
-        score_sum = score_sum + out[weighted_col]
+        signal_sum = signal_sum + signed_values
+        score_sum = score_sum + weighted_values
         any_selected = any_selected.mask(active > 0, 1.0)
 
     aggregate_cols = ["event_any_selected", "event_rule_signal_sum", "event_rule_score_sum"]
-    out["event_any_selected"] = any_selected
-    out["event_rule_signal_sum"] = signal_sum
-    out["event_rule_score_sum"] = score_sum
+    new_cols["event_any_selected"] = any_selected
+    new_cols["event_rule_signal_sum"] = signal_sum
+    new_cols["event_rule_score_sum"] = score_sum
+    if new_cols:
+        out = pd.concat([out, pd.DataFrame(new_cols, index=out.index)], axis=1)
     return out, signed_cols, weighted_cols, aggregate_cols
 
 
@@ -1462,15 +1467,16 @@ def strategy_metrics(pred_df, signal_col="trade_signal", ret_col="strategy_ret_n
     }
 
 
-def sharpe_like(returns):
+def sharpe_like(returns, hold=1):
     returns = pd.Series(returns).fillna(0.0)
     std = returns.std(ddof=1)
     if std == 0 or np.isnan(std):
         return 0.0
-    return float(np.sqrt(252) * returns.mean() / std)
+    periods_per_year = 252 / max(int(hold), 1)
+    return float(np.sqrt(periods_per_year) * returns.mean() / std)
 
 
-def event_days_only_metrics(pred_df, signal_col="trade_signal", ret_col="strategy_ret_no_cost"):
+def event_days_only_metrics(pred_df, signal_col="trade_signal", ret_col="strategy_ret_no_cost", hold=1):
     if "event_any_selected" not in pred_df.columns:
         return {"event_days": 0, "event_coverage": 0.0}
 
@@ -1535,7 +1541,7 @@ def event_days_only_metrics(pred_df, signal_col="trade_signal", ret_col="strateg
         "auc": float(auc),
         "trade_accuracy": trade_accuracy,
         "trade_count": int(len(traded)),
-        "sharpe": sharpe_like(event_df[ret_col]),
+        "sharpe": sharpe_like(event_df[ret_col], hold=hold),
         **strategy_metrics(event_df, signal_col=signal_col, ret_col=ret_col),
     }
 
@@ -2024,21 +2030,24 @@ def main():
         },
         "event_selection": selection_stats,
         "validation_strategy": strategy_metrics(val_pred_df),
-        "validation_event_days": event_days_only_metrics(val_pred_df),
+        "validation_event_days": event_days_only_metrics(val_pred_df, hold=args.hold),
         "validation_rule_event_days": event_days_only_metrics(
             val_pred_df,
             signal_col="rule_trade_signal",
             ret_col="rule_strategy_ret_no_cost",
+            hold=args.hold,
         ),
         "validation_model_event_day_threshold": event_days_only_metrics(
             val_pred_df,
             signal_col="event_day_trade_signal",
             ret_col="event_day_strategy_ret_no_cost",
+            hold=args.hold,
         ),
         "validation_hybrid_event_days": event_days_only_metrics(
             val_pred_df,
             signal_col="hybrid_trade_signal",
             ret_col="hybrid_strategy_ret_no_cost",
+            hold=args.hold,
         ),
         "test": {
             "loss": test_metrics["loss"],
@@ -2046,21 +2055,24 @@ def main():
             "regime_accuracy": test_metrics["regime_acc"],
             **strategy_metrics(pred_df),
         },
-        "test_event_days": event_days_only_metrics(pred_df),
+        "test_event_days": event_days_only_metrics(pred_df, hold=args.hold),
         "test_rule_event_days": event_days_only_metrics(
             pred_df,
             signal_col="rule_trade_signal",
             ret_col="rule_strategy_ret_no_cost",
+            hold=args.hold,
         ),
         "test_model_event_day_threshold": event_days_only_metrics(
             pred_df,
             signal_col="event_day_trade_signal",
             ret_col="event_day_strategy_ret_no_cost",
+            hold=args.hold,
         ),
         "test_hybrid_event_days": event_days_only_metrics(
             pred_df,
             signal_col="hybrid_trade_signal",
             ret_col="hybrid_strategy_ret_no_cost",
+            hold=args.hold,
         ),
         "classification_report": report,
         "confusion_matrix_labels": [DIRECTION_LABELS[i] for i in DIRECTION_LABELS],
