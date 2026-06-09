@@ -1,0 +1,89 @@
+Post-level event features: data/output/trump_posts_with_event_features_tw.csv
+Trump events are aggregated from decision_time_D < Timestamp <= decision_time_D+1.
+Base binary event count: 56
+Event + combo count: 1596
+Eligible selected events before top-k: 39
+Deduped overlapping events: 8
+Selected events for DL: 31
+
+Top selected brute-force events:
+                           event   n  mean_ret  median_ret      std   hit_up  hit_down direction  directional_hit    score
+has_market_brag&deal_over_tariff  70  0.006772    0.006309 0.015046 0.742857  0.257143      long         0.742857 0.042086
+        has_deal&has_market_brag  79  0.006406    0.006303 0.015592 0.721519  0.278481      long         0.721519 0.041084
+          has_attack&short_posts 290  0.003931    0.004227 0.016942 0.603448  0.396552      long         0.603448 0.040398
+       has_market_brag&deal_only  55  0.006979    0.006329 0.012261 0.763636  0.236364      long         0.763636 0.039526
+      posts_high&has_market_brag 107  0.005140    0.006135 0.015384 0.710280  0.289720      long         0.710280 0.037762
+ posts_very_high&has_market_brag  63  0.006493    0.007964 0.016255 0.730159  0.269841      long         0.730159 0.037632
+       has_attack&has_night_post 561  0.002706    0.003448 0.016641 0.579323  0.420677      long         0.579323 0.037133
+    has_market_brag&has_all_caps  53  0.006577    0.009070 0.015219 0.773585  0.226415      long         0.773585 0.037043
+        has_night_post&deal_only 243  0.003741    0.004545 0.017727 0.621399  0.378601      long         0.621399 0.036237
+      has_attack&has_market_brag 133  0.004490    0.005068 0.015853 0.691729  0.308271      long         0.691729 0.035816
+         silence_day&volume_drop 140  0.005430    0.005366 0.022808 0.557143  0.442857      long         0.557143 0.035794
+         has_attack&lots_of_excl 567  0.002585    0.003384 0.016799 0.578483  0.421517      long         0.578483 0.035605
+           short_posts&deal_only 138  0.004779    0.004668 0.019405 0.608696  0.391304      long         0.608696 0.034171
+           posts_high&has_attack 353  0.003072    0.004098 0.017647 0.589235  0.410765      long         0.589235 0.034009
+  has_market_brag&has_night_post 151  0.004074    0.004695 0.014930 0.675497  0.324503      long         0.675497 0.033816
+             has_deal&has_attack 269  0.003538    0.004098 0.017941 0.579926  0.420074      long         0.579926 0.033655
+ has_night_post&deal_over_tariff 285  0.003283    0.004008 0.017778 0.596491  0.403509      long         0.596491 0.033055
+       has_attack&positive_heavy 468  0.002621    0.003396 0.017205 0.576923  0.423077      long         0.576923 0.032718
+         has_deal&has_night_post 323  0.003104    0.003788 0.017625 0.585139  0.414861      long         0.585139 0.032639
+            has_deal&short_posts 160  0.004324    0.004609 0.019091 0.593750  0.406250      long         0.593750 0.032472
+
+Dataset summary:
+Rows: train=829, val=198, test=198
+Samples: train=829, val=198, test=198
+Feature set: full
+Market features: 49 | Event/regime features: 154
+Direction label counts:
+direction_label
+up      651
+down    534
+Regime label counts:
+regime_label
+neutral      559
+calm_bull    308
+oversold     207
+risk_off     111
+Term segment counts:
+term_segment
+1    898
+2    287
+
+Training on device: cpu
+Model type: gated_mlp
+Direction class weights: [1.1023999452590942, 0.9150000214576721]
+Epoch 001 | train_loss=1.0321 | val_loss=0.9849 | val_acc=0.5354 | val_regime_acc=0.5152
+Epoch 002 | train_loss=0.9403 | val_loss=0.9546 | val_acc=0.4949 | val_regime_acc=0.5960
+Epoch 003 | train_loss=0.8765 | val_loss=0.9093 | val_acc=0.5152 | val_regime_acc=0.6970
+Epoch 004 | train_loss=0.8109 | val_loss=0.8769 | val_acc=0.5101 | val_regime_acc=0.7525
+Epoch 005 | train_loss=0.7481 | val_loss=0.8338 | val_acc=0.5202 | val_regime_acc=0.7778
+Epoch 006 | train_loss=0.7003 | val_loss=0.8248 | val_acc=0.4899 | val_regime_acc=0.8384
+Epoch 007 | train_loss=0.6818 | val_loss=0.8172 | val_acc=0.5202 | val_regime_acc=0.8687
+Epoch 008 | train_loss=0.6420 | val_loss=0.7956 | val_acc=0.5101 | val_regime_acc=0.8990
+Epoch 009 | train_loss=0.6271 | val_loss=0.8326 | val_acc=0.5152 | val_regime_acc=0.9192
+Epoch 010 | train_loss=0.6143 | val_loss=0.8166 | val_acc=0.5101 | val_regime_acc=0.9495
+Epoch 011 | train_loss=0.6070 | val_loss=0.8392 | val_acc=0.4949 | val_regime_acc=0.9394
+Epoch 012 | train_loss=0.5739 | val_loss=0.8499 | val_acc=0.5253 | val_regime_acc=0.9394
+Epoch 013 | train_loss=0.5633 | val_loss=0.8766 | val_acc=0.5000 | val_regime_acc=0.9444
+Epoch 014 | train_loss=0.5520 | val_loss=0.9101 | val_acc=0.5303 | val_regime_acc=0.9596
+Epoch 015 | train_loss=0.5406 | val_loss=0.8976 | val_acc=0.5455 | val_regime_acc=0.9596
+Epoch 016 | train_loss=0.5159 | val_loss=0.9093 | val_acc=0.5404 | val_regime_acc=0.9596
+Early stop at epoch 16; best_val_loss=0.7956
+
+==============================
+Target: 2330.TW
+Selected brute-force events: 31
+Test acc: 0.4545
+Test regime acc: 0.9192
+Selected trade edge threshold: 0.275 (auto=True)
+Trade mode: long_short | coverage=53.03% | long=4 | short=101 | neutral=93
+Strategy return no cost: mean=-0.001901, total=-0.3272
+Event-days only: days=90 coverage=45.45% acc=0.4667 trades=59 total=-0.2597
+Event rule baseline: trades=90 total=0.6532
+Event-day threshold: threshold=0.275 trades=59 total=-0.2597
+Hybrid event-days: alpha=1.000 threshold=0.075 trades=86 total=-0.3005
+Confusion matrix rows=true, cols=pred [down, up]:
+[[ 80   7]
+ [101  10]]
+Saved outputs to: /home/butter303062/political-sentiment-stock-pred/data/output/fusion_ablation_multi/2330.TW/gated_concat
+==============================

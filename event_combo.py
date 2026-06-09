@@ -123,6 +123,17 @@ def parse_args():
         default="full",
         help="Use full event+market features or a market-only baseline with Trump event features removed.",
     )
+    parser.add_argument(
+        "--fusion-mode",
+        choices=["gated_concat", "raw_concat", "ungated_concat", "add"],
+        default="gated_concat",
+        help=(
+            "How the market and event branches are fused in gated_mlp/lstm. "
+            "gated_concat is the proposed architecture; raw_concat feeds scaled raw features directly; "
+            "ungated_concat concatenates market_state and event_state without a gate; "
+            "add uses market_state + gated_event_state."
+        ),
+    )
     parser.add_argument("--hidden-dim", type=int, default=64)
     parser.add_argument("--dropout", type=float, default=0.25)
     parser.add_argument("--patience", type=int, default=8)
@@ -1123,8 +1134,9 @@ class FusionDataset(Dataset):
 
 
 class RegimeFusionLSTM(nn.Module):
-    def __init__(self, market_dim, event_dim, hidden_dim, dropout):
+    def __init__(self, market_dim, event_dim, hidden_dim, dropout, fusion_mode="gated_concat"):
         super().__init__()
+        self.fusion_mode = fusion_mode
         self.market_lstm = nn.LSTM(
             market_dim,
             hidden_dim,
@@ -1152,9 +1164,12 @@ class RegimeFusionLSTM(nn.Module):
             nn.Linear(hidden_dim, hidden_dim),
             nn.Sigmoid(),
         )
+        direction_input_dim = market_dim + event_dim if fusion_mode == "raw_concat" else hidden_dim * 2
+        if fusion_mode == "add":
+            direction_input_dim = hidden_dim
         self.direction_head = nn.Sequential(
-            nn.LayerNorm(hidden_dim * 2),
-            nn.Linear(hidden_dim * 2, hidden_dim),
+            nn.LayerNorm(direction_input_dim),
+            nn.Linear(direction_input_dim, hidden_dim),
             nn.ReLU(),
             nn.Dropout(dropout),
             nn.Linear(hidden_dim, len(DIRECTION_LABELS)),
@@ -1166,14 +1181,23 @@ class RegimeFusionLSTM(nn.Module):
         event_state = self.event_encoder(event_x)
         gate = self.gate(torch.cat([market_state, event_state], dim=1))
         fused_event = gate * event_state
-        logits = self.direction_head(torch.cat([market_state, fused_event], dim=1))
+        if self.fusion_mode == "raw_concat":
+            direction_input = torch.cat([market_x[:, -1, :], event_x], dim=1)
+        elif self.fusion_mode == "ungated_concat":
+            direction_input = torch.cat([market_state, event_state], dim=1)
+        elif self.fusion_mode == "add":
+            direction_input = market_state + fused_event
+        else:
+            direction_input = torch.cat([market_state, fused_event], dim=1)
+        logits = self.direction_head(direction_input)
         regime_logits = self.regime_head(market_state)
         return logits, regime_logits, gate
 
 
 class RegimeFusionMLP(nn.Module):
-    def __init__(self, market_dim, event_dim, hidden_dim, dropout):
+    def __init__(self, market_dim, event_dim, hidden_dim, dropout, fusion_mode="gated_concat"):
         super().__init__()
+        self.fusion_mode = fusion_mode
         self.market_encoder = nn.Sequential(
             nn.Linear(market_dim, hidden_dim),
             nn.LayerNorm(hidden_dim),
@@ -1203,9 +1227,12 @@ class RegimeFusionMLP(nn.Module):
             nn.Linear(hidden_dim, hidden_dim),
             nn.Sigmoid(),
         )
+        direction_input_dim = market_dim + event_dim if fusion_mode == "raw_concat" else hidden_dim * 2
+        if fusion_mode == "add":
+            direction_input_dim = hidden_dim
         self.direction_head = nn.Sequential(
-            nn.LayerNorm(hidden_dim * 2),
-            nn.Linear(hidden_dim * 2, hidden_dim),
+            nn.LayerNorm(direction_input_dim),
+            nn.Linear(direction_input_dim, hidden_dim),
             nn.ReLU(),
             nn.Dropout(dropout),
             nn.Linear(hidden_dim, len(DIRECTION_LABELS)),
@@ -1216,7 +1243,15 @@ class RegimeFusionMLP(nn.Module):
         event_state = self.event_encoder(event_x)
         gate = self.gate(torch.cat([market_state, event_state], dim=1))
         fused_event = gate * event_state
-        logits = self.direction_head(torch.cat([market_state, fused_event], dim=1))
+        if self.fusion_mode == "raw_concat":
+            direction_input = torch.cat([market_x, event_x], dim=1)
+        elif self.fusion_mode == "ungated_concat":
+            direction_input = torch.cat([market_state, event_state], dim=1)
+        elif self.fusion_mode == "add":
+            direction_input = market_state + fused_event
+        else:
+            direction_input = torch.cat([market_state, fused_event], dim=1)
+        logits = self.direction_head(direction_input)
         regime_logits = self.regime_head(market_state)
         return logits, regime_logits, gate
 
@@ -1228,6 +1263,7 @@ def make_model(args, market_dim, event_dim):
             event_dim=event_dim,
             hidden_dim=args.hidden_dim,
             dropout=args.dropout,
+            fusion_mode=args.fusion_mode,
         )
 
     return RegimeFusionMLP(
@@ -1235,6 +1271,7 @@ def make_model(args, market_dim, event_dim):
         event_dim=event_dim,
         hidden_dim=args.hidden_dim,
         dropout=args.dropout,
+        fusion_mode=args.fusion_mode,
     )
 
 
@@ -1980,6 +2017,7 @@ def main():
             "args": vars(args),
             "model_type": args.model_type,
             "feature_set": args.feature_set,
+            "fusion_mode": args.fusion_mode,
             "market_cols": market_cols,
             "event_cols": all_event_cols,
             "direction_labels": DIRECTION_LABELS,
@@ -1999,6 +2037,7 @@ def main():
         "window": args.window,
         "model_type": args.model_type,
         "feature_set": args.feature_set,
+        "fusion_mode": args.fusion_mode,
         "trade_mode": args.trade_mode,
         "trade_edge_threshold": args.trade_edge_threshold,
         "selected_trade_edge_threshold": selected_trade_edge_threshold,

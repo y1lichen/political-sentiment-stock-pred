@@ -1,0 +1,96 @@
+/home/butter303062/political-sentiment-stock-pred/.venv/lib/python3.12/site-packages/sklearn/metrics/_ranking.py:442: UndefinedMetricWarning: Only one class is present in y_true. ROC AUC score is not defined in that case.
+  warnings.warn(
+/home/butter303062/political-sentiment-stock-pred/.venv/lib/python3.12/site-packages/sklearn/metrics/_ranking.py:442: UndefinedMetricWarning: Only one class is present in y_true. ROC AUC score is not defined in that case.
+  warnings.warn(
+/home/butter303062/political-sentiment-stock-pred/.venv/lib/python3.12/site-packages/sklearn/metrics/_ranking.py:442: UndefinedMetricWarning: Only one class is present in y_true. ROC AUC score is not defined in that case.
+  warnings.warn(
+/home/butter303062/political-sentiment-stock-pred/.venv/lib/python3.12/site-packages/sklearn/metrics/_ranking.py:442: UndefinedMetricWarning: Only one class is present in y_true. ROC AUC score is not defined in that case.
+  warnings.warn(
+Post-level event features: data/output/trump_posts_with_event_features_tw.csv
+Trump events are aggregated from decision_time_D < Timestamp <= decision_time_D+1.
+Base binary event count: 56
+Event + combo count: 1596
+Eligible selected events before top-k: 51
+Deduped overlapping events: 18
+Selected events for DL: 33
+
+Top selected brute-force events:
+                         event   n  mean_ret  median_ret      std   hit_up  hit_down direction  directional_hit    score
+         deal_heavy&has_russia  61  0.007386    0.006711 0.025892 0.688525  0.311475      long         0.688525 0.039718
+   positive_heavy&has_all_caps 148  0.005332    0.004790 0.025746 0.594595  0.405405      long         0.594595 0.038572
+   has_attack&deal_over_tariff 233  0.004308    0.004405 0.025030 0.575107  0.424893      long         0.575107 0.037818
+          has_attack&has_chips  28  0.010972    0.008404 0.027624 0.642857  0.357143      long         0.642857 0.037322
+         posts_high&has_attack 349  0.003605    0.003195 0.026220 0.553009  0.446991      long         0.553009 0.037247
+    posts_very_high&has_attack 208  0.004493    0.003531 0.027717 0.572115  0.427885      long         0.572115 0.037076
+         deal_heavy&has_attack 117  0.005487    0.006250 0.025784 0.623932  0.376068      long         0.623932 0.037033
+   deal_heavy&deal_over_tariff 135  0.005003    0.006250 0.025094 0.637037  0.362963      long         0.637037 0.037032
+          deal_heavy&deal_only  92  0.006018    0.006365 0.023573 0.641304  0.358696      long         0.641304 0.037018
+       attack_heavy&has_russia 145  0.005401    0.004286 0.025488 0.565517  0.434483      long         0.565517 0.036779
+     positive_heavy&has_russia 219  0.004379    0.003881 0.025617 0.566210  0.433790      long         0.566210 0.036690
+posts_very_high&positive_heavy 215  0.004402    0.002972 0.027767 0.567442  0.432558      long         0.567442 0.036625
+      lots_of_excl&short_posts 373  0.003400    0.002882 0.024215 0.554960  0.445040      long         0.554960 0.036442
+         has_tariff&has_russia  61  0.007272    0.006379 0.028321 0.622951  0.377049      long         0.622951 0.035381
+        has_russia&tariff_only  23  0.010559    0.009646 0.020381 0.695652  0.304348      long         0.695652 0.035226
+       deal_heavy&lots_of_excl 140  0.004717    0.004854 0.024612 0.628571  0.371429      long         0.628571 0.035082
+          has_attack&deal_only 199  0.004410    0.003460 0.024043 0.562814  0.437186      long         0.562814 0.035013
+           has_deal&has_attack 265  0.003710    0.003195 0.025184 0.558491  0.441509      long         0.558491 0.033728
+       has_attack&has_all_caps 148  0.004553    0.004790 0.025809 0.594595  0.405405      long         0.594595 0.032933
+          posts_high&has_chips  23  0.011255    0.003979 0.030387 0.608696  0.391304      long         0.608696 0.032854
+
+Dataset summary:
+Rows: train=847, val=202, test=202
+Samples: train=847, val=202, test=202
+Feature set: full
+Market features: 49 | Event/regime features: 178
+Direction label counts:
+direction_label
+up      624
+down    587
+Regime label counts:
+regime_label
+neutral      418
+oversold     390
+calm_bull    271
+risk_off     132
+Term segment counts:
+term_segment
+1    928
+2    283
+
+Training on device: cpu
+Model type: gated_mlp
+Direction class weights: [1.0355000495910645, 0.9668999910354614]
+Epoch 001 | train_loss=1.0348 | val_loss=0.9620 | val_acc=0.5149 | val_regime_acc=0.5792
+Epoch 002 | train_loss=0.9204 | val_loss=0.8859 | val_acc=0.5594 | val_regime_acc=0.7970
+Epoch 003 | train_loss=0.8129 | val_loss=0.8278 | val_acc=0.4901 | val_regime_acc=0.8812
+Epoch 004 | train_loss=0.7213 | val_loss=0.7781 | val_acc=0.5396 | val_regime_acc=0.9158
+Epoch 005 | train_loss=0.6701 | val_loss=0.7601 | val_acc=0.5248 | val_regime_acc=0.9406
+Epoch 006 | train_loss=0.6357 | val_loss=0.7562 | val_acc=0.5297 | val_regime_acc=0.9356
+Epoch 007 | train_loss=0.6142 | val_loss=0.7439 | val_acc=0.5248 | val_regime_acc=0.9653
+Epoch 008 | train_loss=0.5937 | val_loss=0.7636 | val_acc=0.4851 | val_regime_acc=0.9703
+Epoch 009 | train_loss=0.5783 | val_loss=0.7812 | val_acc=0.4802 | val_regime_acc=0.9703
+Epoch 010 | train_loss=0.5668 | val_loss=0.7636 | val_acc=0.4950 | val_regime_acc=0.9703
+Epoch 011 | train_loss=0.5412 | val_loss=0.7854 | val_acc=0.4901 | val_regime_acc=0.9752
+Epoch 012 | train_loss=0.5252 | val_loss=0.8009 | val_acc=0.5099 | val_regime_acc=0.9653
+Epoch 013 | train_loss=0.5138 | val_loss=0.8291 | val_acc=0.5050 | val_regime_acc=0.9604
+Epoch 014 | train_loss=0.5019 | val_loss=0.8138 | val_acc=0.5050 | val_regime_acc=0.9752
+Epoch 015 | train_loss=0.4901 | val_loss=0.8306 | val_acc=0.5099 | val_regime_acc=0.9802
+Early stop at epoch 15; best_val_loss=0.7439
+
+==============================
+Target: 2454.TW
+Selected brute-force events: 33
+Test acc: 0.5297
+Test regime acc: 0.9257
+Selected trade edge threshold: 0.250 (auto=True)
+Trade mode: long_short | coverage=36.14% | long=57 | short=16 | neutral=129
+Strategy return no cost: mean=0.001192, total=0.2178
+Event-days only: days=1 coverage=0.50% acc=1.0000 trades=0 total=0.0000
+Event rule baseline: trades=1 total=-0.0441
+Event-day threshold: threshold=0.250 trades=0 total=0.0000
+Hybrid event-days: alpha=0.500 threshold=0.000 trades=1 total=-0.0441
+Confusion matrix rows=true, cols=pred [down, up]:
+[[35 60]
+ [35 72]]
+Saved outputs to: /home/butter303062/political-sentiment-stock-pred/data/output/fusion_ablation_multi/2454.TW/raw_concat
+==============================
